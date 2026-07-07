@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -39,8 +40,10 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 
 	getPageTool := mcp.NewTool(
 		"confluence_get_page",
-		mcp.WithDescription("Get a Confluence page by ID"),
+		mcp.WithDescription("Get a Confluence page by ID. Returns the body as Markdown by default."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID")),
+		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default) or 'storage' (raw JSON)")),
+		mcp.WithString("output_path", mcp.Description("Optional path to write the Markdown to; returns metadata instead of the body")),
 	)
 
 	s.AddTool(getPageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -49,7 +52,25 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.GetPage(pageID))
+		if request.GetString("representation", "markdown") == "storage" {
+			return jsonResult(client.GetPage(pageID))
+		}
+
+		page, err := client.GetPageMarkdown(pageID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if out := request.GetString("output_path", ""); out != "" {
+			if err := os.WriteFile(out, []byte(page.Markdown), 0o644); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText(fmt.Sprintf(
+				"Wrote page %s (title %q, space %s, version %d) to %s",
+				page.ID, page.Title, page.Space, page.Version, out)), nil
+		}
+
+		return mcp.NewToolResultText(page.Markdown), nil
 	})
 
 	getChildrenTool := mcp.NewTool(
@@ -70,9 +91,10 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 
 	getCommentsTool := mcp.NewTool(
 		"confluence_get_comments",
-		mcp.WithDescription("Get the comments on a Confluence page"),
+		mcp.WithDescription("Get the comments on a Confluence page. Returns Markdown by default."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of comments (default 25)")),
+		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default) or 'storage' (raw JSON)")),
 	)
 
 	s.AddTool(getCommentsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -80,8 +102,17 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		limit := request.GetInt("limit", 25)
 
-		return jsonResult(client.GetComments(pageID, request.GetInt("limit", 25)))
+		if request.GetString("representation", "markdown") == "storage" {
+			return jsonResult(client.GetComments(pageID, limit))
+		}
+
+		md, err := client.GetCommentsMarkdown(pageID, limit)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(md), nil
 	})
 
 	getAttachmentsTool := mcp.NewTool(

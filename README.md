@@ -159,6 +159,28 @@ On Windows the command path will be the `.exe`, e.g.
 All tools are read-only and authenticate with the configured Personal Access
 Token.
 
+### Markdown workflow (token-efficient)
+
+Confluence page and comment tools use **Markdown** by default instead of raw
+storage XHTML, cutting token usage on both reads and writes.
+
+- **Write inline:** pass Markdown as `content` to `confluence_create_page` /
+  `confluence_update_page`.
+- **Write from a file:** pass `file_path` to publish a local `.md` file. Ideal
+  for large pages — edit the file surgically, then push.
+- **Read to a file:** pass `output_path` to `confluence_get_page` to write the
+  Markdown to disk (returns metadata only), so large pages never fill context.
+- **Exact fidelity:** pass `representation="storage"` on reads/writes to bypass
+  Markdown conversion.
+
+**Images:** `![alt](name.png)` references a page attachment (upload it first
+with `confluence_upload_attachment`); `![alt](https://…)` embeds an external URL.
+
+**Mermaid:** ` ```mermaid ` blocks are rendered to PNG and uploaded as
+attachments **if the `mmdc` CLI (`@mermaid-js/mermaid-cli`) is on PATH**. Without
+it, the block is stored as a code macro. Rendering is one-way — reads return the
+image, not the Mermaid source.
+
 ### `confluence_search`
 
 Search Confluence content.

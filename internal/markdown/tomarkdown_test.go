@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestToMarkdownConfluenceTable(t *testing.T) {
+	// Confluence storage tables: <tbody> with a <th> header row, no <thead>.
+	storage := `<table><tbody>` +
+		`<tr><th>Name</th><th>Result</th></tr>` +
+		`<tr><td>init</td><td>PASS</td></tr>` +
+		`<tr><td>send</td><td>FAIL</td></tr>` +
+		`</tbody></table>`
+	got, err := ToMarkdown(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A real GFM table has pipe-delimited rows and a header separator.
+	if !strings.Contains(got, "| Name | Result |") {
+		t.Errorf("header row not rendered as GFM table: %q", got)
+	}
+	if !strings.Contains(got, "| init | PASS |") {
+		t.Errorf("body row not rendered as GFM table: %q", got)
+	}
+	// Regression guard: cells must not be concatenated without separators.
+	if strings.Contains(got, "NameResult") || strings.Contains(got, "initPASS") {
+		t.Errorf("table flattened (cells concatenated): %q", got)
+	}
+}
+
 func TestToMarkdownHeadingAndList(t *testing.T) {
 	got, err := ToMarkdown("<h2>Title</h2><ul><li>a</li><li>b</li></ul>")
 	if err != nil {

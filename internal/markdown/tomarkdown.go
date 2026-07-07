@@ -5,6 +5,7 @@ import (
 	"regexp"
 
 	htmltomd "github.com/JohannesKaufmann/html-to-markdown"
+	"github.com/JohannesKaufmann/html-to-markdown/plugin"
 )
 
 var (
@@ -25,6 +26,9 @@ var (
 func ToMarkdown(storage string) (string, error) {
 	h := preprocessStorage(storage)
 	conv := htmltomd.NewConverter("", true, nil)
+	// Confluence tables are standard HTML tables; without this plugin they are
+	// stripped to concatenated cell text. Table renders them as GFM pipe tables.
+	conv.Use(plugin.Table())
 	return conv.ConvertString(h)
 }
 

@@ -3,6 +3,7 @@ package confluence
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"dinhphu28/atlassian-mcp/internal/markdown"
 )
@@ -143,4 +144,89 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// PageMarkdown is a page rendered as Markdown plus the metadata needed to
+// update it without a second fetch.
+type PageMarkdown struct {
+	ID       string
+	Title    string
+	Space    string
+	Version  int
+	Markdown string
+}
+
+// GetPageMarkdown fetches a page and returns its body converted to Markdown.
+func (c *Client) GetPageMarkdown(pageID string) (*PageMarkdown, error) {
+	raw, err := c.GetPage(pageID)
+	if err != nil {
+		return nil, err
+	}
+
+	var p struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Space struct {
+			Key string `json:"key"`
+		} `json:"space"`
+		Version struct {
+			Number int `json:"number"`
+		} `json:"version"`
+		Body struct {
+			Storage struct {
+				Value string `json:"value"`
+			} `json:"storage"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil, fmt.Errorf("cannot parse page %s: %w", pageID, err)
+	}
+
+	md, err := markdown.ToMarkdown(p.Body.Storage.Value)
+	if err != nil {
+		return nil, err
+	}
+
+	return &PageMarkdown{
+		ID:       p.ID,
+		Title:    p.Title,
+		Space:    p.Space.Key,
+		Version:  p.Version.Number,
+		Markdown: md,
+	}, nil
+}
+
+// GetCommentsMarkdown fetches a page's comments and returns them as a Markdown
+// list, each comment's body converted from storage format.
+func (c *Client) GetCommentsMarkdown(pageID string, limit int) (string, error) {
+	raw, err := c.GetComments(pageID, limit)
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		Results []struct {
+			Body struct {
+				Storage struct {
+					Value string `json:"value"`
+				} `json:"storage"`
+			} `json:"body"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return "", fmt.Errorf("cannot parse comments for %s: %w", pageID, err)
+	}
+
+	var b strings.Builder
+	for i, cm := range resp.Results {
+		md, err := markdown.ToMarkdown(cm.Body.Storage.Value)
+		if err != nil {
+			return "", err
+		}
+		if i > 0 {
+			b.WriteString("\n\n---\n\n")
+		}
+		b.WriteString(md)
+	}
+	return b.String(), nil
 }

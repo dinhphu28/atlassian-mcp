@@ -116,3 +116,38 @@ func TestAddCommentMarkdownConverts(t *testing.T) {
 		t.Errorf("comment not converted to storage: %s", postBody)
 	}
 }
+
+func TestGetPageMarkdownConverts(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"7","title":"T","space":{"key":"DEV"},"version":{"number":4},"body":{"storage":{"value":"<h2>Hi</h2>"}}}`)
+	})
+	c, srv := newTestClient(h)
+	defer srv.Close()
+
+	p, err := c.GetPageMarkdown("7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ID != "7" || p.Title != "T" || p.Space != "DEV" || p.Version != 4 {
+		t.Errorf("bad metadata: %+v", p)
+	}
+	if !strings.Contains(p.Markdown, "## Hi") {
+		t.Errorf("body not converted: %q", p.Markdown)
+	}
+}
+
+func TestGetCommentsMarkdownConverts(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"results":[{"body":{"storage":{"value":"<p>hello</p>"}}}]}`)
+	})
+	c, srv := newTestClient(h)
+	defer srv.Close()
+
+	got, err := c.GetCommentsMarkdown("7", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "hello") {
+		t.Errorf("comment body not converted: %q", got)
+	}
+}

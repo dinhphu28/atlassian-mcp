@@ -1,6 +1,7 @@
 package confluence
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +17,17 @@ func bodyField(representation, content string) map[string]any {
 			"representation": representation,
 		},
 	}
+}
+
+// marshalPayload JSON-encodes v without HTML-escaping so that storage-format
+// XHTML (e.g. <h2>, <ac:image>) is transmitted verbatim rather than as <
+// escapes.
+func marshalPayload(v any) []byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+	return bytes.TrimRight(buf.Bytes(), "\n")
 }
 
 // Search runs a CQL query and returns up to limit results.
@@ -59,7 +71,7 @@ func (c *Client) CreatePage(spaceKey, title, content, parentID, representation s
 		payload["ancestors"] = []map[string]any{{"id": parentID}}
 	}
 
-	body, _ := json.Marshal(payload)
+	body := marshalPayload(payload)
 	return c.do(http.MethodPost, "/rest/api/content", string(body))
 }
 
@@ -97,7 +109,7 @@ func (c *Client) UpdatePage(pageID, content, title, representation string) (stri
 		"body":    bodyField(representation, content),
 	}
 
-	body, _ := json.Marshal(payload)
+	body := marshalPayload(payload)
 	return c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(pageID), string(body))
 }
 
@@ -109,7 +121,7 @@ func (c *Client) AddComment(pageID, content, representation string) (string, err
 		"body":      bodyField(representation, content),
 	}
 
-	body, _ := json.Marshal(payload)
+	body := marshalPayload(payload)
 	return c.do(http.MethodPost, "/rest/api/content", string(body))
 }
 
@@ -173,7 +185,7 @@ func (c *Client) MovePage(pageID, targetParentID string) (string, error) {
 		"body":      bodyField(current.Body.Storage.Representation, current.Body.Storage.Value),
 	}
 
-	body, _ := json.Marshal(payload)
+	body := marshalPayload(payload)
 	return c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(pageID), string(body))
 }
 
@@ -204,6 +216,6 @@ func (c *Client) ReplyToComment(parentCommentID, content, representation string)
 		"body":      bodyField(representation, content),
 	}
 
-	body, _ := json.Marshal(payload)
+	body := marshalPayload(payload)
 	return c.do(http.MethodPost, "/rest/api/content", string(body))
 }

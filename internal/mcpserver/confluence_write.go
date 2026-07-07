@@ -10,17 +10,42 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"dinhphu28/atlassian-mcp/internal/confluence"
+	"dinhphu28/atlassian-mcp/internal/mermaid"
 )
+
+// mermaidRenderer returns a renderer when mmdc is available, else nil so that
+// diagrams degrade to code macros.
+func mermaidRenderer() confluence.MermaidRenderer {
+	if !mermaid.Available() {
+		return nil
+	}
+	return mermaid.Render
+}
+
+// readContent returns the body to publish: the file contents when filePath is
+// set, otherwise the inline content.
+func readContent(inline, filePath string) (string, error) {
+	if filePath == "" {
+		return inline, nil
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
 
 func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client) {
 	createPageTool := mcp.NewTool(
 		"confluence_create_page",
-		mcp.WithDescription("Create a new Confluence page"),
+		mcp.WithDescription("Create a new Confluence page. Body is Markdown by default; "+
+			"```mermaid blocks are rendered to images when mmdc is installed."),
 		mcp.WithString("space_key", mcp.Required(), mcp.Description("Key of the space to create the page in")),
 		mcp.WithString("title", mcp.Required(), mcp.Description("Page title")),
-		mcp.WithString("content", mcp.Required(), mcp.Description("Page body in the given representation (storage-format XHTML by default)")),
+		mcp.WithString("content", mcp.Description("Page body in the given representation (Markdown by default). Ignored when file_path is set.")),
+		mcp.WithString("file_path", mcp.Description("Optional path to a local Markdown file to publish instead of inline content")),
 		mcp.WithString("parent_id", mcp.Description("Optional parent page ID to nest under")),
-		mcp.WithString("representation", mcp.Description("Body format: 'storage' (default) or 'wiki'")),
+		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
 	)
 
 	s.AddTool(createPageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -32,25 +57,28 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		content, err := request.RequireString("content")
+		content, err := readContent(request.GetString("content", ""), request.GetString("file_path", ""))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.CreatePage(
-			spaceKey, title, content,
-			request.GetString("parent_id", ""),
-			request.GetString("representation", "storage"),
-		))
+		representation := request.GetString("representation", "markdown")
+		parentID := request.GetString("parent_id", "")
+		if representation == "markdown" {
+			return jsonResult(client.CreatePageMarkdown(spaceKey, title, content, parentID, mermaidRenderer()))
+		}
+		return jsonResult(client.CreatePage(spaceKey, title, content, parentID, representation))
 	})
 
 	updatePageTool := mcp.NewTool(
 		"confluence_update_page",
-		mcp.WithDescription("Update an existing Confluence page (version is bumped automatically)"),
+		mcp.WithDescription("Update an existing Confluence page (version is bumped automatically). "+
+			"Body is Markdown by default; ```mermaid blocks are rendered to images when mmdc is installed."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID")),
-		mcp.WithString("content", mcp.Required(), mcp.Description("New page body in the given representation")),
+		mcp.WithString("content", mcp.Description("New page body in the given representation (Markdown by default). Ignored when file_path is set.")),
+		mcp.WithString("file_path", mcp.Description("Optional path to a local Markdown file to publish instead of inline content")),
 		mcp.WithString("title", mcp.Description("New title (keeps the existing title if omitted)")),
-		mcp.WithString("representation", mcp.Description("Body format: 'storage' (default) or 'wiki'")),
+		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
 	)
 
 	s.AddTool(updatePageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -58,24 +86,25 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		content, err := request.RequireString("content")
+		content, err := readContent(request.GetString("content", ""), request.GetString("file_path", ""))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.UpdatePage(
-			pageID, content,
-			request.GetString("title", ""),
-			request.GetString("representation", "storage"),
-		))
+		representation := request.GetString("representation", "markdown")
+		title := request.GetString("title", "")
+		if representation == "markdown" {
+			return jsonResult(client.UpdatePageMarkdown(pageID, content, title, mermaidRenderer()))
+		}
+		return jsonResult(client.UpdatePage(pageID, content, title, representation))
 	})
 
 	addCommentTool := mcp.NewTool(
 		"confluence_add_comment",
-		mcp.WithDescription("Add a comment to a Confluence page"),
+		mcp.WithDescription("Add a comment to a Confluence page. Body is Markdown by default."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID to comment on")),
-		mcp.WithString("content", mcp.Required(), mcp.Description("Comment body in the given representation")),
-		mcp.WithString("representation", mcp.Description("Body format: 'storage' (default) or 'wiki'")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("Comment body in the given representation (Markdown by default)")),
+		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
 	)
 
 	s.AddTool(addCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -88,10 +117,11 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.AddComment(
-			pageID, content,
-			request.GetString("representation", "storage"),
-		))
+		representation := request.GetString("representation", "markdown")
+		if representation == "markdown" {
+			return jsonResult(client.AddCommentMarkdown(pageID, content))
+		}
+		return jsonResult(client.AddComment(pageID, content, representation))
 	})
 
 	deletePageTool := mcp.NewTool(
@@ -180,10 +210,10 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 
 	replyToCommentTool := mcp.NewTool(
 		"confluence_reply_to_comment",
-		mcp.WithDescription("Reply to an existing Confluence comment"),
+		mcp.WithDescription("Reply to an existing Confluence comment. Body is Markdown by default."),
 		mcp.WithString("parent_comment_id", mcp.Required(), mcp.Description("ID of the comment to reply to")),
-		mcp.WithString("content", mcp.Required(), mcp.Description("Reply body in the given representation")),
-		mcp.WithString("representation", mcp.Description("Body format: 'storage' (default) or 'wiki'")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("Reply body in the given representation (Markdown by default)")),
+		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
 	)
 
 	s.AddTool(replyToCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -196,9 +226,10 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.ReplyToComment(
-			parentCommentID, content,
-			request.GetString("representation", "storage"),
-		))
+		representation := request.GetString("representation", "markdown")
+		if representation == "markdown" {
+			return jsonResult(client.ReplyToCommentMarkdown(parentCommentID, content))
+		}
+		return jsonResult(client.ReplyToComment(parentCommentID, content, representation))
 	})
 }

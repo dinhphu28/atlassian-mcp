@@ -45,6 +45,14 @@ func (c *Client) AddComment(key, body string) (string, error) {
 	return c.do(http.MethodPost, "/rest/api/2/issue/"+url.PathEscape(key)+"/comment", string(payload))
 }
 
+// UpdateComment edits an existing comment (Jira wiki markup) on an issue.
+func (c *Client) UpdateComment(key, commentID, body string) (string, error) {
+	payload, _ := json.Marshal(map[string]any{"body": body})
+	return c.do(http.MethodPut,
+		"/rest/api/2/issue/"+url.PathEscape(key)+"/comment/"+url.PathEscape(commentID),
+		string(payload))
+}
+
 // UpdateIssue updates an issue's summary and/or description. Empty values are
 // left unchanged; at least one must be provided.
 func (c *Client) UpdateIssue(key, summary, description string) error {

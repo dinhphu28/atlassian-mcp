@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -85,6 +87,31 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("Updated issue %s", key)), nil
+	})
+
+	uploadAttachmentTool := mcp.NewTool(
+		"jira_upload_attachment",
+		mcp.WithDescription("Upload a local file as an attachment on a Jira issue"),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("file_path", mcp.Required(), mcp.Description("Absolute path to the local file to upload")),
+	)
+
+	s.AddTool(uploadAttachmentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		filePath, err := request.RequireString("file_path")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return jsonResult(client.UploadAttachment(key, filepath.Base(filePath), data))
 	})
 
 	transitionIssueTool := mcp.NewTool(

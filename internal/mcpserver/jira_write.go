@@ -62,6 +62,31 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		return jsonResult(client.AddComment(key, body))
 	})
 
+	updateCommentTool := mcp.NewTool(
+		"jira_update_comment",
+		mcp.WithDescription("Edit an existing comment on a Jira issue (get the comment id from jira_get_comments)"),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("comment_id", mcp.Required(), mcp.Description("Comment id from jira_get_comments")),
+		mcp.WithString("body", mcp.Required(), mcp.Description("New comment body (Jira wiki markup)")),
+	)
+
+	s.AddTool(updateCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		commentID, err := request.RequireString("comment_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		body, err := request.RequireString("body")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return jsonResult(client.UpdateComment(key, commentID, body))
+	})
+
 	updateIssueTool := mcp.NewTool(
 		"jira_update_issue",
 		mcp.WithDescription("Update a Jira issue's summary and/or description"),

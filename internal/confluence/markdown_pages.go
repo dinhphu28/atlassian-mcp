@@ -111,6 +111,15 @@ func (c *Client) ReplyToCommentMarkdown(parentCommentID, md string) (string, err
 	return c.ReplyToComment(parentCommentID, storage, "storage")
 }
 
+// UpdateCommentMarkdown edits a comment using Markdown.
+func (c *Client) UpdateCommentMarkdown(commentID, md string) (string, error) {
+	storage, err := markdownComment(md)
+	if err != nil {
+		return "", err
+	}
+	return c.UpdateComment(commentID, storage, "storage")
+}
+
 // markdownComment converts comment Markdown to storage, degrading any Mermaid
 // blocks to code macros (no image rendering).
 func markdownComment(md string) (string, error) {

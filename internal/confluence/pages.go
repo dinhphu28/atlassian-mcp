@@ -131,6 +131,40 @@ func (c *Client) DeletePage(pageID string) error {
 	return err
 }
 
+// UpdateComment edits an existing comment. The current version is fetched
+// automatically and bumped. representation is the body format, e.g. "storage".
+func (c *Client) UpdateComment(commentID, content, representation string) (string, error) {
+	raw, err := c.get("/rest/api/content/" + url.PathEscape(commentID) + "?expand=version")
+	if err != nil {
+		return "", err
+	}
+
+	var current struct {
+		Version struct {
+			Number int `json:"number"`
+		} `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(raw), &current); err != nil {
+		return "", fmt.Errorf("cannot parse current comment %s: %w", commentID, err)
+	}
+
+	payload := map[string]any{
+		"id":      commentID,
+		"type":    "comment",
+		"version": map[string]any{"number": current.Version.Number + 1},
+		"body":    bodyField(representation, content),
+	}
+
+	body := marshalPayload(payload)
+	return c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(commentID), string(body))
+}
+
+// DeleteComment deletes a comment by ID.
+func (c *Client) DeleteComment(commentID string) error {
+	_, err := c.do(http.MethodDelete, "/rest/api/content/"+url.PathEscape(commentID), "")
+	return err
+}
+
 // GetLabels lists the labels on a page.
 func (c *Client) GetLabels(pageID string) (string, error) {
 	return c.get("/rest/api/content/" + url.PathEscape(pageID) + "/label")

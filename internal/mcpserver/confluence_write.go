@@ -143,6 +143,51 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		return mcp.NewToolResultText(fmt.Sprintf("Deleted page %s", pageID)), nil
 	})
 
+	updateCommentTool := mcp.NewTool(
+		"confluence_update_comment",
+		mcp.WithDescription("Edit an existing Confluence comment (version is bumped automatically). "+
+			"Body is Markdown by default. Get the comment id from confluence_get_comments."),
+		mcp.WithString("comment_id", mcp.Required(), mcp.Description("ID of the comment to edit")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("New comment body in the given representation (Markdown by default)")),
+		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
+	)
+
+	s.AddTool(updateCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		commentID, err := request.RequireString("comment_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		content, err := request.RequireString("content")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		representation := request.GetString("representation", "markdown")
+		if representation == "markdown" {
+			return jsonResult(client.UpdateCommentMarkdown(commentID, content))
+		}
+		return jsonResult(client.UpdateComment(commentID, content, representation))
+	})
+
+	deleteCommentTool := mcp.NewTool(
+		"confluence_delete_comment",
+		mcp.WithDescription("Delete a Confluence comment by ID"),
+		mcp.WithString("comment_id", mcp.Required(), mcp.Description("ID of the comment to delete")),
+	)
+
+	s.AddTool(deleteCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		commentID, err := request.RequireString("comment_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if err := client.DeleteComment(commentID); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Deleted comment %s", commentID)), nil
+	})
+
 	uploadAttachmentTool := mcp.NewTool(
 		"confluence_upload_attachment",
 		mcp.WithDescription("Upload a local file as an attachment on a Confluence page"),

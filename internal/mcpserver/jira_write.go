@@ -139,6 +139,33 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		return jsonResult(client.UploadAttachment(key, filepath.Base(filePath), data))
 	})
 
+	setTargetDatesTool := mcp.NewTool(
+		"jira_set_target_dates",
+		mcp.WithDescription("Set an issue's Advanced Roadmaps 'Target start' and/or 'Target end' dates. "+
+			"The customfield ids are auto-discovered, so this works on any instance with Advanced Roadmaps enabled."),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("target_start", mcp.Description("Target start date as yyyy-MM-dd (unchanged if omitted)")),
+		mcp.WithString("target_end", mcp.Description("Target end date as yyyy-MM-dd (unchanged if omitted)")),
+	)
+
+	s.AddTool(setTargetDatesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		msg, err := client.SetTargetDates(
+			key,
+			request.GetString("target_start", ""),
+			request.GetString("target_end", ""),
+		)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(msg), nil
+	})
+
 	transitionIssueTool := mcp.NewTool(
 		"jira_transition_issue",
 		mcp.WithDescription("Move a Jira issue through a status transition (get the id from jira_get_transitions)"),

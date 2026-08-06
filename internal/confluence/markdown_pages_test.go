@@ -258,3 +258,35 @@ func TestGetCommentsMarkdownConverts(t *testing.T) {
 		t.Errorf("comment body not converted: %q", got)
 	}
 }
+
+// Comments must include nested replies (depth=all) and carry author + date, and
+// mark replies by their thread depth — the data the old body-only path dropped.
+func TestGetCommentsMarkdownIncludesAuthorDateAndNesting(t *testing.T) {
+	var gotQuery string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		io.WriteString(w, `{"results":[
+			{"history":{"createdBy":{"displayName":"An Nguyen Thien"},"createdDate":"2026-08-06T10:00:00.000+07:00"},"ancestors":[],"body":{"storage":{"value":"<p>top</p>"}}},
+			{"history":{"createdBy":{"displayName":"Phu Nguyen Dinh"},"createdDate":"2026-08-06T11:00:00.000+07:00"},"ancestors":[{"id":"1"},{"id":"2"}],"body":{"storage":{"value":"<p>deep reply</p>"}}}
+		]}`)
+	})
+	c, srv := newTestClient(h)
+	defer srv.Close()
+
+	got, err := c.GetCommentsMarkdown("7", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotQuery, "depth=all") {
+		t.Errorf("expected depth=all in request, got query: %s", gotQuery)
+	}
+	for _, want := range []string{"An Nguyen Thien", "Phu Nguyen Dinh", "2026-08-06T10:00:00", "top", "deep reply"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+	// The 2-level-deep reply must be marked as a reply at depth 2.
+	if !strings.Contains(got, "reply (depth 2)") {
+		t.Errorf("nested comment not marked with its depth:\n%s", got)
+	}
+}

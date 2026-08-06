@@ -51,9 +51,11 @@ func (c *Client) GetPageChildren(pageID string, limit int) (string, error) {
 	return c.get(path)
 }
 
-// GetComments returns the comments on a page.
+// GetComments returns the comments on a page. depth=all includes nested replies
+// (children of comments), not just top-level comments; history carries each
+// comment's author and created date, and ancestors gives its reply chain.
 func (c *Client) GetComments(pageID string, limit int) (string, error) {
-	path := fmt.Sprintf("/rest/api/content/%s/child/comment?limit=%d&expand=body.storage,version",
+	path := fmt.Sprintf("/rest/api/content/%s/child/comment?limit=%d&depth=all&expand=body.storage,version,history,ancestors",
 		url.PathEscape(pageID), limit)
 	return c.get(path)
 }

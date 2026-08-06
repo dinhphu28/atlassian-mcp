@@ -91,7 +91,9 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 
 	getCommentsTool := mcp.NewTool(
 		"confluence_get_comments",
-		mcp.WithDescription("Get the comments on a Confluence page. Returns Markdown by default."),
+		mcp.WithDescription("Get the comments on a Confluence page, including nested replies. "+
+			"Returns Markdown by default, each comment prefixed with its author and date; "+
+			"use representation 'storage' for raw JSON."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of comments (default 25)")),
 		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default) or 'storage' (raw JSON)")),

@@ -299,6 +299,15 @@ func (c *Client) GetCommentsMarkdown(pageID string, limit int) (string, error) {
 
 	var resp struct {
 		Results []struct {
+			History struct {
+				CreatedBy struct {
+					DisplayName string `json:"displayName"`
+				} `json:"createdBy"`
+				CreatedDate string `json:"createdDate"`
+			} `json:"history"`
+			Ancestors []struct {
+				ID string `json:"id"`
+			} `json:"ancestors"`
 			Body struct {
 				Storage struct {
 					Value string `json:"value"`
@@ -310,6 +319,10 @@ func (c *Client) GetCommentsMarkdown(pageID string, limit int) (string, error) {
 		return "", fmt.Errorf("cannot parse comments for %s: %w", pageID, err)
 	}
 
+	if len(resp.Results) == 0 {
+		return "No comments.", nil
+	}
+
 	var b strings.Builder
 	for i, cm := range resp.Results {
 		md, err := markdown.ToMarkdown(cm.Body.Storage.Value)
@@ -319,6 +332,24 @@ func (c *Client) GetCommentsMarkdown(pageID string, limit int) (string, error) {
 		if i > 0 {
 			b.WriteString("\n\n---\n\n")
 		}
+
+		// Header carries author + created date (dropped by the old body-only
+		// conversion) and marks nested replies by their depth in the thread.
+		author := cm.History.CreatedBy.DisplayName
+		if author == "" {
+			author = "unknown"
+		}
+		b.WriteString("**")
+		b.WriteString(author)
+		b.WriteString("**")
+		if cm.History.CreatedDate != "" {
+			b.WriteString(" · ")
+			b.WriteString(cm.History.CreatedDate)
+		}
+		if depth := len(cm.Ancestors); depth > 0 {
+			b.WriteString(fmt.Sprintf(" · ↳ reply (depth %d)", depth))
+		}
+		b.WriteString("\n\n")
 		b.WriteString(md)
 	}
 	return b.String(), nil

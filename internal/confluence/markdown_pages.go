@@ -1,6 +1,8 @@
 package confluence
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -16,47 +18,69 @@ type MermaidRenderer func(source string) ([]byte, error)
 // and uploaded as attachments; if that is not possible they degrade to code
 // macros. Because attachments require an existing page, a page with diagrams is
 // created first (with code-macro fallbacks) and then patched to reference the
-// uploaded images.
-func (c *Client) CreatePageMarkdown(spaceKey, title, md, parentID string, render MermaidRenderer) (string, error) {
+// uploaded images. The returned warnings list any diagram that did not become an
+// image (and why); the page write still succeeds.
+func (c *Client) CreatePageMarkdown(spaceKey, title, md, parentID string, render MermaidRenderer) (string, []string, error) {
 	storage, diagrams, err := markdown.ToStorage(md)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	initial := applyDiagrams(storage, diagrams, nil)
 	raw, err := c.CreatePage(spaceKey, title, initial, parentID, "storage")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if len(diagrams) == 0 || render == nil {
-		return raw, nil
+	if len(diagrams) == 0 {
+		return raw, nil, nil
+	}
+	if render == nil {
+		return raw, rendererUnavailableWarnings(diagrams), nil
 	}
 
 	pageID := parseID(raw)
 	if pageID == "" {
-		return raw, nil
+		return raw, nil, nil
 	}
-	filenames := renderAndUpload(c, pageID, diagrams, render)
+	// A freshly created page has no prior attachments to reuse.
+	filenames, warnings := renderAndUpload(c, pageID, diagrams, render, nil)
 	if len(filenames) == 0 {
-		return raw, nil
+		return raw, warnings, nil
 	}
 	final := applyDiagrams(storage, diagrams, filenames)
-	return c.UpdatePage(pageID, final, title, "storage")
+	updated, err := c.UpdatePage(pageID, final, title, "storage")
+	if err != nil {
+		return "", warnings, err
+	}
+	return updated, warnings, nil
 }
 
 // UpdatePageMarkdown updates a page from Markdown, rendering and uploading any
-// Mermaid diagrams to the existing page before the version bump.
-func (c *Client) UpdatePageMarkdown(pageID, md, title string, render MermaidRenderer) (string, error) {
+// Mermaid diagrams to the existing page before the version bump. When a diagram
+// fails to render or upload but an attachment for it already exists on the page,
+// the existing image is reused rather than downgrading the page to a code macro.
+// The returned warnings list any diagram that did not become an image.
+func (c *Client) UpdatePageMarkdown(pageID, md, title string, render MermaidRenderer) (string, []string, error) {
 	storage, diagrams, err := markdown.ToStorage(md)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	filenames := map[string]string{}
-	if len(diagrams) > 0 && render != nil {
-		filenames = renderAndUpload(c, pageID, diagrams, render)
+	var warnings []string
+	if len(diagrams) > 0 {
+		if render == nil {
+			warnings = rendererUnavailableWarnings(diagrams)
+		} else {
+			existing := c.attachmentFilenames(pageID)
+			filenames, warnings = renderAndUpload(c, pageID, diagrams, render, existing)
+		}
 	}
 	final := applyDiagrams(storage, diagrams, filenames)
-	return c.UpdatePage(pageID, final, title, "storage")
+	updated, err := c.UpdatePage(pageID, final, title, "storage")
+	if err != nil {
+		return "", warnings, err
+	}
+	return updated, warnings, nil
 }
 
 // applyDiagrams substitutes each diagram placeholder with either an image
@@ -74,22 +98,82 @@ func applyDiagrams(storage string, diagrams []markdown.Diagram, filenames map[st
 	return storage
 }
 
+// diagramFilename derives a stable attachment name from the diagram source, so
+// the same diagram always maps to the same attachment (idempotent re-upload) and
+// reordering/inserting diagrams never silently clobbers an unrelated image.
+func diagramFilename(source string) string {
+	sum := sha256.Sum256([]byte(source))
+	return "mermaid-" + hex.EncodeToString(sum[:])[:8] + ".png"
+}
+
 // renderAndUpload renders each diagram and uploads successful renders as
-// attachments, returning placeholder -> filename for those that succeeded.
-func renderAndUpload(c *Client, pageID string, diagrams []markdown.Diagram, render MermaidRenderer) map[string]string {
+// attachments, returning placeholder -> filename for the images now available.
+// existing is the set of attachment filenames already on the page: when a render
+// or upload fails but a matching attachment already exists, it is reused instead
+// of falling back to a code macro. The second return value lists a warning for
+// each diagram that failed, whether or not an existing image rescued it.
+func renderAndUpload(c *Client, pageID string, diagrams []markdown.Diagram, render MermaidRenderer, existing map[string]bool) (map[string]string, []string) {
 	filenames := map[string]string{}
+	var warnings []string
 	for i, d := range diagrams {
+		name := diagramFilename(d.Source)
+
 		png, err := render(d.Source)
 		if err != nil {
+			warnings = append(warnings, reuseOrWarn(filenames, existing, d.Placeholder, name, i, "render", err))
 			continue
 		}
-		name := fmt.Sprintf("mermaid-%d.png", i)
 		if _, err := c.UploadAttachment(pageID, name, png); err != nil {
+			warnings = append(warnings, reuseOrWarn(filenames, existing, d.Placeholder, name, i, "upload", err))
 			continue
 		}
 		filenames[d.Placeholder] = name
 	}
-	return filenames
+	return filenames, warnings
+}
+
+// reuseOrWarn records a fallback for a failed diagram: if the attachment already
+// exists on the page it is reused (keeping the page an image) and the warning
+// notes that; otherwise the diagram degrades to a code macro. It returns the
+// warning message.
+func reuseOrWarn(filenames map[string]string, existing map[string]bool, placeholder, name string, i int, stage string, cause error) string {
+	if existing[name] {
+		filenames[placeholder] = name
+		return fmt.Sprintf("diagram %d: %s failed (%v); reused existing attachment %s", i, stage, cause, name)
+	}
+	return fmt.Sprintf("diagram %d: %s failed, rendered as code block: %v", i, stage, cause)
+}
+
+// rendererUnavailableWarnings reports that mmdc was not available, so every
+// diagram fell back to a code macro.
+func rendererUnavailableWarnings(diagrams []markdown.Diagram) []string {
+	warnings := make([]string, 0, len(diagrams))
+	for i := range diagrams {
+		warnings = append(warnings, fmt.Sprintf("diagram %d: mmdc not available, rendered as code block (set MERMAID_CLI_PATH or install mermaid-cli)", i))
+	}
+	return warnings
+}
+
+// attachmentFilenames returns the set of attachment titles currently on a page.
+// On any error it returns nil, so callers simply proceed with no reuse.
+func (c *Client) attachmentFilenames(pageID string) map[string]bool {
+	raw, err := c.GetAttachments(pageID, 200)
+	if err != nil {
+		return nil
+	}
+	var resp struct {
+		Results []struct {
+			Title string `json:"title"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return nil
+	}
+	set := make(map[string]bool, len(resp.Results))
+	for _, r := range resp.Results {
+		set[r.Title] = true
+	}
+	return set
 }
 
 // AddCommentMarkdown posts a comment authored in Markdown. Mermaid blocks are

@@ -65,7 +65,7 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		representation := request.GetString("representation", "markdown")
 		parentID := request.GetString("parent_id", "")
 		if representation == "markdown" {
-			return jsonResult(client.CreatePageMarkdown(spaceKey, title, content, parentID, mermaidRenderer()))
+			return markdownPageResult(client.CreatePageMarkdown(spaceKey, title, content, parentID, mermaidRenderer()))
 		}
 		return jsonResult(client.CreatePage(spaceKey, title, content, parentID, representation))
 	})
@@ -94,7 +94,7 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		representation := request.GetString("representation", "markdown")
 		title := request.GetString("title", "")
 		if representation == "markdown" {
-			return jsonResult(client.UpdatePageMarkdown(pageID, content, title, mermaidRenderer()))
+			return markdownPageResult(client.UpdatePageMarkdown(pageID, content, title, mermaidRenderer()))
 		}
 		return jsonResult(client.UpdatePage(pageID, content, title, representation))
 	})

@@ -15,11 +15,12 @@ import (
 func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 	createIssueTool := mcp.NewTool(
 		"jira_create_issue",
-		mcp.WithDescription("Create a new Jira issue"),
+		mcp.WithDescription("Create a new Jira issue. For a sub-task issue type, parent_key is required."),
 		mcp.WithString("project_key", mcp.Required(), mcp.Description("Project key, e.g. DEV")),
-		mcp.WithString("issue_type", mcp.Required(), mcp.Description("Issue type name, e.g. Task, Bug, Story")),
+		mcp.WithString("issue_type", mcp.Required(), mcp.Description("Issue type name, e.g. Task, Bug, Story, Sub-task")),
 		mcp.WithString("summary", mcp.Required(), mcp.Description("Issue summary/title")),
 		mcp.WithString("description", mcp.Description("Issue description (Jira wiki markup)")),
+		mcp.WithString("parent_key", mcp.Description("Parent issue key (e.g. DEV-123); required when issue_type is a sub-task")),
 	)
 
 	s.AddTool(createIssueTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -39,6 +40,7 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		return jsonResult(client.CreateIssue(
 			projectKey, issueType, summary,
 			request.GetString("description", ""),
+			request.GetString("parent_key", ""),
 		))
 	})
 

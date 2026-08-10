@@ -89,6 +89,30 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		return jsonResult(client.UpdateComment(key, commentID, body))
 	})
 
+	deleteCommentTool := mcp.NewTool(
+		"jira_delete_comment",
+		mcp.WithDescription("Delete a comment from a Jira issue (get the comment id from jira_get_comments)"),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("comment_id", mcp.Required(), mcp.Description("Comment id from jira_get_comments")),
+	)
+
+	s.AddTool(deleteCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		commentID, err := request.RequireString("comment_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if err := client.DeleteComment(key, commentID); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Deleted comment %s on %s", commentID, key)), nil
+	})
+
 	updateIssueTool := mcp.NewTool(
 		"jira_update_issue",
 		mcp.WithDescription("Update a Jira issue's summary and/or description"),

@@ -57,6 +57,13 @@ func (c *Client) UpdateComment(key, commentID, body string) (string, error) {
 		string(payload))
 }
 
+// DeleteComment deletes a comment from an issue.
+func (c *Client) DeleteComment(key, commentID string) error {
+	_, err := c.do(http.MethodDelete,
+		"/rest/api/2/issue/"+url.PathEscape(key)+"/comment/"+url.PathEscape(commentID), "")
+	return err
+}
+
 // UpdateIssue updates an issue's summary and/or description. Empty values are
 // left unchanged; at least one must be provided.
 func (c *Client) UpdateIssue(key, summary, description string) error {

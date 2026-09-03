@@ -21,6 +21,7 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		mcp.WithString("summary", mcp.Required(), mcp.Description("Issue summary/title")),
 		mcp.WithString("description", mcp.Description("Issue description (Jira wiki markup)")),
 		mcp.WithString("parent_key", mcp.Description("Parent issue key (e.g. DEV-123); required when issue_type is a sub-task")),
+		mcp.WithString("assignee", mcp.Description("Optional Jira username to assign the new issue to")),
 	)
 
 	s.AddTool(createIssueTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -41,6 +42,7 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 			projectKey, issueType, summary,
 			request.GetString("description", ""),
 			request.GetString("parent_key", ""),
+			request.GetString("assignee", ""),
 		))
 	})
 
@@ -214,5 +216,29 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("Transitioned issue %s (transition %s)", key, transitionID)), nil
+	})
+
+	assignIssueTool := mcp.NewTool(
+		"jira_assign_issue",
+		mcp.WithDescription("Assign a Jira issue to a user. Leave assignee empty (or 'null') to unassign; use '-1' for the project's default assignee."),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("assignee", mcp.Description("Jira username to assign to; empty or 'null' unassigns, '-1' sets the default assignee")),
+	)
+
+	s.AddTool(assignIssueTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		assignee := request.GetString("assignee", "")
+
+		if err := client.AssignIssue(key, assignee); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if assignee == "" || assignee == "null" {
+			return mcp.NewToolResultText(fmt.Sprintf("Unassigned issue %s", key)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Assigned issue %s to %s", key, assignee)), nil
 	})
 }

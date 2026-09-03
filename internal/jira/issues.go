@@ -26,7 +26,8 @@ func (c *Client) GetComments(key string) (string, error) {
 // CreateIssue creates an issue in the given project. description is optional and
 // uses Jira wiki markup. parentKey is optional and required only for sub-task
 // issue types, which Jira rejects unless a parent is supplied at creation time.
-func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey string) (string, error) {
+// assignee is an optional Jira username to assign the new issue to.
+func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey, assignee string) (string, error) {
 	fields := map[string]any{
 		"project":   map[string]any{"key": projectKey},
 		"issuetype": map[string]any{"name": issueType},
@@ -37,6 +38,9 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 	}
 	if parentKey != "" {
 		fields["parent"] = map[string]any{"key": parentKey}
+	}
+	if assignee != "" {
+		fields["assignee"] = map[string]any{"name": assignee}
 	}
 
 	body, _ := json.Marshal(map[string]any{"fields": fields})
@@ -61,6 +65,22 @@ func (c *Client) UpdateComment(key, commentID, body string) (string, error) {
 func (c *Client) DeleteComment(key, commentID string) error {
 	_, err := c.do(http.MethodDelete,
 		"/rest/api/2/issue/"+url.PathEscape(key)+"/comment/"+url.PathEscape(commentID), "")
+	return err
+}
+
+// AssignIssue sets an issue's assignee. assignee is a Jira username; an empty
+// string or "null" unassigns the issue, and "-1" resets it to the project's
+// default assignee.
+func (c *Client) AssignIssue(key, assignee string) error {
+	var name any
+	switch assignee {
+	case "", "null":
+		name = nil
+	default:
+		name = assignee
+	}
+	body, _ := json.Marshal(map[string]any{"name": name})
+	_, err := c.do(http.MethodPut, "/rest/api/2/issue/"+url.PathEscape(key)+"/assignee", string(body))
 	return err
 }
 

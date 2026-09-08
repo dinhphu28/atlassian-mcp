@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -62,6 +63,13 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 		}
 
 		if out := request.GetString("output_path", ""); out != "" {
+			// Create the parent directory so a not-yet-existing output folder is
+			// not an error.
+			if dir := filepath.Dir(out); dir != "" {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					return mcp.NewToolResultError(err.Error()), nil
+				}
+			}
 			if err := os.WriteFile(out, []byte(page.Markdown), 0o644); err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}

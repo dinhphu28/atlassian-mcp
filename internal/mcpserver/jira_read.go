@@ -74,6 +74,21 @@ func registerJiraReadTools(s *server.MCPServer, client *jira.Client) {
 		return jsonResult(client.GetTransitions(key))
 	})
 
+	getWorklogsTool := mcp.NewTool(
+		"jira_get_worklogs",
+		mcp.WithDescription("Get the work logged on a Jira issue (worklog ids for jira_update_worklog / jira_delete_worklog)"),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+	)
+
+	s.AddTool(getWorklogsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return jsonResult(client.GetWorklogs(key))
+	})
+
 	downloadAttachmentsTool := mcp.NewTool(
 		"jira_download_attachments",
 		mcp.WithDescription("Download all attachments on a Jira issue. Images are returned as viewable images; other files as base64."),

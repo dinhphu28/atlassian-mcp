@@ -241,4 +241,97 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("Assigned issue %s to %s", key, assignee)), nil
 	})
+
+	addWorklogTool := mcp.NewTool(
+		"jira_add_worklog",
+		mcp.WithDescription("Log work (time spent) on a Jira issue"),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("time_spent", mcp.Required(), mcp.Description("Time spent as a Jira duration, e.g. '3h 30m' or '1d'")),
+		mcp.WithString("started", mcp.Description("When the work started; 'yyyy-MM-dd', 'yyyy-MM-dd HH:mm' or a full timestamp (defaults to now, local time zone)")),
+		mcp.WithString("comment", mcp.Description("Worklog comment (Jira wiki markup)")),
+		mcp.WithString("adjust_estimate", mcp.Description("How to adjust the remaining estimate: auto (default), leave, new or manual")),
+		mcp.WithString("estimate_value", mcp.Description("Jira duration for adjust_estimate: the new estimate for 'new', the amount to reduce by for 'manual'")),
+	)
+
+	s.AddTool(addWorklogTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		timeSpent, err := request.RequireString("time_spent")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return jsonResult(client.AddWorklog(
+			key, timeSpent,
+			request.GetString("started", ""),
+			request.GetString("comment", ""),
+			request.GetString("adjust_estimate", ""),
+			request.GetString("estimate_value", ""),
+		))
+	})
+
+	updateWorklogTool := mcp.NewTool(
+		"jira_update_worklog",
+		mcp.WithDescription("Edit a worklog on a Jira issue (get the worklog id from jira_get_worklogs). "+
+			"Omitted fields keep their current values."),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("worklog_id", mcp.Required(), mcp.Description("Worklog id from jira_get_worklogs")),
+		mcp.WithString("time_spent", mcp.Description("New time spent, e.g. '3h 30m' (unchanged if omitted)")),
+		mcp.WithString("started", mcp.Description("New start time; 'yyyy-MM-dd', 'yyyy-MM-dd HH:mm' or a full timestamp (unchanged if omitted)")),
+		mcp.WithString("comment", mcp.Description("New worklog comment in Jira wiki markup (unchanged if omitted)")),
+		mcp.WithString("adjust_estimate", mcp.Description("How to adjust the remaining estimate: auto (default), leave or new")),
+		mcp.WithString("estimate_value", mcp.Description("Jira duration for the new estimate when adjust_estimate is 'new'")),
+	)
+
+	s.AddTool(updateWorklogTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		worklogID, err := request.RequireString("worklog_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return jsonResult(client.UpdateWorklog(
+			key, worklogID,
+			request.GetString("time_spent", ""),
+			request.GetString("started", ""),
+			request.GetString("comment", ""),
+			request.GetString("adjust_estimate", ""),
+			request.GetString("estimate_value", ""),
+		))
+	})
+
+	deleteWorklogTool := mcp.NewTool(
+		"jira_delete_worklog",
+		mcp.WithDescription("Delete a worklog from a Jira issue (get the worklog id from jira_get_worklogs)"),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("worklog_id", mcp.Required(), mcp.Description("Worklog id from jira_get_worklogs")),
+		mcp.WithString("adjust_estimate", mcp.Description("How to adjust the remaining estimate: auto (default), leave, new or manual")),
+		mcp.WithString("estimate_value", mcp.Description("Jira duration for adjust_estimate: the new estimate for 'new', the amount to increase by for 'manual'")),
+	)
+
+	s.AddTool(deleteWorklogTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		worklogID, err := request.RequireString("worklog_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if err := client.DeleteWorklog(
+			key, worklogID,
+			request.GetString("adjust_estimate", ""),
+			request.GetString("estimate_value", ""),
+		); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Deleted worklog %s on %s", worklogID, key)), nil
+	})
 }

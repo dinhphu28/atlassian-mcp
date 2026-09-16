@@ -41,10 +41,19 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 
 	getPageTool := mcp.NewTool(
 		"confluence_get_page",
-		mcp.WithDescription("Get a Confluence page by ID. Returns the body as Markdown by default."),
+		mcp.WithDescription("Get a Confluence page by ID. Returns the body as Markdown by default, which is "+
+			"lossy: macros, panels, layouts, status lozenges and task lists do not survive the conversion. "+
+			"Read with representation='storage' whenever you intend to write the body back, or need a "+
+			"Confluence-native construct Markdown cannot express."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID")),
-		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default) or 'storage' (raw JSON)")),
-		mcp.WithString("output_path", mcp.Description("Optional path to write the Markdown to; returns metadata instead of the body")),
+		mcp.WithString("representation",
+			mcp.Enum(reprMarkdown, reprStorage),
+			mcp.DefaultString(reprMarkdown),
+			mcp.Description("Body format: 'markdown' (default, lossy) or 'storage' (Confluence storage XHTML, exact)")),
+		mcp.WithString("output_path", mcp.Description("Optional path to write the body to (parent directories are created); "+
+			"returns page metadata instead of the body. Honoured for both representations: writes Markdown, "+
+			"or the raw storage XHTML when representation='storage'.")),
+		mcp.WithBoolean("body_only", mcp.Description("storage only: return just the storage XHTML instead of the full REST JSON envelope (default false)")),
 	)
 
 	s.AddTool(getPageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -52,9 +61,27 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		repr, err := bodyRepresentation(request, reprMarkdown, reprStorage)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out := request.GetString("output_path", "")
 
-		if request.GetString("representation", "markdown") == "storage" {
-			return jsonResult(client.GetPage(pageID))
+		if repr == reprStorage {
+			// The JSON envelope is the cheapest answer, but it cannot be written
+			// to a file or handed over as editable XHTML without being decoded.
+			if out == "" && !request.GetBool("body_only", false) {
+				return jsonResult(client.GetPage(pageID))
+			}
+
+			page, err := client.GetPageStorage(pageID)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			if out == "" {
+				return mcp.NewToolResultText(page.Storage), nil
+			}
+			return writeBodyResult(out, page.Storage, page.ID, page.Title, page.Space, page.Version)
 		}
 
 		page, err := client.GetPageMarkdown(pageID)
@@ -62,23 +89,16 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		if out := request.GetString("output_path", ""); out != "" {
-			// Create the parent directory so a not-yet-existing output folder is
-			// not an error.
-			if dir := filepath.Dir(out); dir != "" {
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					return mcp.NewToolResultError(err.Error()), nil
-				}
-			}
-			if err := os.WriteFile(out, []byte(page.Markdown), 0o644); err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			return mcp.NewToolResultText(fmt.Sprintf(
-				"Wrote page %s (title %q, space %s, version %d) to %s",
-				page.ID, page.Title, page.Space, page.Version, out)), nil
+		body := page.Markdown
+		if notice := lossNotice(page.Dropped); notice != "" {
+			body = notice + "\n" + body
 		}
 
-		return mcp.NewToolResultText(page.Markdown), nil
+		if out != "" {
+			return writeBodyResult(out, body, page.ID, page.Title, page.Space, page.Version)
+		}
+
+		return mcp.NewToolResultText(body), nil
 	})
 
 	getChildrenTool := mcp.NewTool(
@@ -104,7 +124,10 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 			"use representation 'storage' for raw JSON."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of comments (default 25)")),
-		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default) or 'storage' (raw JSON)")),
+		mcp.WithString("representation",
+			mcp.Enum(reprMarkdown, reprStorage),
+			mcp.DefaultString(reprMarkdown),
+			mcp.Description("Body format: 'markdown' (default, lossy) or 'storage' (raw JSON with storage XHTML bodies)")),
 	)
 
 	s.AddTool(getCommentsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -114,7 +137,11 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 		}
 		limit := request.GetInt("limit", 25)
 
-		if request.GetString("representation", "markdown") == "storage" {
+		repr, err := bodyRepresentation(request, reprMarkdown, reprStorage)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if repr == reprStorage {
 			return jsonResult(client.GetComments(pageID, limit))
 		}
 
@@ -199,4 +226,35 @@ func registerConfluenceReadTools(s *server.MCPServer, client *confluence.Client)
 
 		return jsonResult(client.GetPageHistory(pageID, request.GetInt("limit", 25)))
 	})
+}
+
+// writeBodyResult writes a page body to path, creating the parent directory so a
+// not-yet-existing output folder is not an error, and reports the page metadata
+// instead of the body.
+func writeBodyResult(path, body, id, title, space string, version int) (*mcp.CallToolResult, error) {
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Wrote page %s (title %q, space %s, version %d) to %s",
+		id, title, space, version, path)), nil
+}
+
+// lossNotice turns the constructs a Markdown conversion could not represent into
+// one inert Markdown comment, so an agent reading a page can tell that editing
+// this body as Markdown would drop them.
+func lossNotice(dropped []string) string {
+	if len(dropped) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("<!-- confluence-mcp: %d Confluence construct(s) were flattened or dropped by the "+
+		"Markdown conversion (%s). Re-read with representation=\"storage\" to edit this page without losing them. -->\n",
+		len(dropped), strings.Join(dropped, ", "))
 }

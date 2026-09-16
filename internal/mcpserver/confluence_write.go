@@ -35,6 +35,20 @@ func readContent(inline, filePath string) (string, error) {
 	return string(data), nil
 }
 
+// bodyArgument returns the body to publish and whether the caller supplied one
+// at all. Both content and file_path are optional, and an absent body must not
+// be treated as an empty one: publishing "" replaces the page with a blank
+// body, which is never what a caller who simply omitted the argument meant.
+func bodyArgument(request mcp.CallToolRequest) (string, bool, error) {
+	if filePath := request.GetString("file_path", ""); filePath != "" {
+		content, err := readContent("", filePath)
+		return content, true, err
+	}
+
+	content := request.GetString("content", "")
+	return content, content != "", nil
+}
+
 func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client) {
 	createPageTool := mcp.NewTool(
 		"confluence_create_page",
@@ -43,9 +57,15 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		mcp.WithString("space_key", mcp.Required(), mcp.Description("Key of the space to create the page in")),
 		mcp.WithString("title", mcp.Required(), mcp.Description("Page title")),
 		mcp.WithString("content", mcp.Description("Page body in the given representation (Markdown by default). Ignored when file_path is set.")),
-		mcp.WithString("file_path", mcp.Description("Optional path to a local Markdown file to publish instead of inline content")),
+		mcp.WithString("file_path", mcp.Description("Optional path to a local file to publish instead of inline content. "+
+			"Read in the chosen representation: Markdown by default, Confluence storage XHTML when representation='storage'.")),
 		mcp.WithString("parent_id", mcp.Description("Optional parent page ID to nest under")),
-		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
+		mcp.WithString("representation",
+			mcp.Enum(reprMarkdown, reprStorage, reprWiki),
+			mcp.DefaultString(reprMarkdown),
+			mcp.Description("Body format: 'markdown' (default, converted by this server and lossy), "+
+				"'storage' (Confluence storage XHTML, sent verbatim - use it for macros, panels, layouts, "+
+				"expand blocks, status lozenges and task lists), or 'wiki' (legacy wiki markup)")),
 	)
 
 	s.AddTool(createPageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -57,28 +77,46 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		content, err := readContent(request.GetString("content", ""), request.GetString("file_path", ""))
+		content, hasBody, err := bodyArgument(request)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if !hasBody {
+			return mcp.NewToolResultError("one of 'content' or 'file_path' is required"), nil
+		}
+		repr, err := bodyRepresentation(request, reprMarkdown, reprStorage, reprWiki)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		representation := request.GetString("representation", "markdown")
 		parentID := request.GetString("parent_id", "")
-		if representation == "markdown" {
+		if repr == reprMarkdown {
 			return markdownPageResult(client.CreatePageMarkdown(spaceKey, title, content, parentID, mermaidRenderer()))
 		}
-		return jsonResult(client.CreatePage(spaceKey, title, content, parentID, representation))
+		return jsonResult(client.CreatePage(spaceKey, title, content, parentID, repr))
 	})
 
 	updatePageTool := mcp.NewTool(
 		"confluence_update_page",
 		mcp.WithDescription("Update an existing Confluence page (version is bumped automatically). "+
-			"Body is Markdown by default; ```mermaid blocks are rendered to images when mmdc is installed."),
+			"Body is Markdown by default; ```mermaid blocks are rendered to images when mmdc is installed. "+
+			"The body is replaced wholesale, so to preserve macros and other Confluence-native markup read the "+
+			"page with representation='storage', edit that XHTML, and write it back with representation='storage'."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID")),
 		mcp.WithString("content", mcp.Description("New page body in the given representation (Markdown by default). Ignored when file_path is set.")),
-		mcp.WithString("file_path", mcp.Description("Optional path to a local Markdown file to publish instead of inline content")),
-		mcp.WithString("title", mcp.Description("New title (keeps the existing title if omitted)")),
-		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
+		mcp.WithString("file_path", mcp.Description("Optional path to a local file to publish instead of inline content. "+
+			"Read in the chosen representation: Markdown by default, Confluence storage XHTML when representation='storage'.")),
+		mcp.WithString("title", mcp.Description("New title (keeps the existing title if omitted). "+
+			"Passing only a title renames the page and leaves its body untouched.")),
+		mcp.WithNumber("expected_version", mcp.Description("Version this edit is based on (the version.number from your read). "+
+			"When set, the write is rejected if the content changed since that read instead of overwriting it; "+
+			"omit to always win the race.")),
+		mcp.WithString("representation",
+			mcp.Enum(reprMarkdown, reprStorage, reprWiki),
+			mcp.DefaultString(reprMarkdown),
+			mcp.Description("Body format: 'markdown' (default, converted by this server and lossy), "+
+				"'storage' (Confluence storage XHTML, sent verbatim - use it for macros, panels, layouts, "+
+				"expand blocks, status lozenges and task lists), or 'wiki' (legacy wiki markup)")),
 	)
 
 	s.AddTool(updatePageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -86,17 +124,31 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		content, err := readContent(request.GetString("content", ""), request.GetString("file_path", ""))
+		content, hasBody, err := bodyArgument(request)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		repr, err := bodyRepresentation(request, reprMarkdown, reprStorage, reprWiki)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		representation := request.GetString("representation", "markdown")
 		title := request.GetString("title", "")
-		if representation == "markdown" {
-			return markdownPageResult(client.UpdatePageMarkdown(pageID, content, title, mermaidRenderer()))
+		expectedVersion := request.GetInt("expected_version", 0)
+
+		// No body given: rename if that is what was asked for, rather than
+		// publishing an empty one over the page.
+		if !hasBody {
+			if title == "" {
+				return mcp.NewToolResultError("one of 'content', 'file_path' or 'title' is required"), nil
+			}
+			return jsonResult(client.RenamePage(pageID, title))
 		}
-		return jsonResult(client.UpdatePage(pageID, content, title, representation))
+
+		if repr == reprMarkdown {
+			return markdownPageResult(client.UpdatePageMarkdownAt(pageID, content, title, mermaidRenderer(), expectedVersion))
+		}
+		return jsonResult(client.UpdatePageAt(pageID, content, title, repr, expectedVersion))
 	})
 
 	addCommentTool := mcp.NewTool(
@@ -104,7 +156,12 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		mcp.WithDescription("Add a comment to a Confluence page. Body is Markdown by default."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID to comment on")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Comment body in the given representation (Markdown by default)")),
-		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
+		mcp.WithString("representation",
+			mcp.Enum(reprMarkdown, reprStorage, reprWiki),
+			mcp.DefaultString(reprMarkdown),
+			mcp.Description("Body format: 'markdown' (default, converted by this server and lossy), "+
+				"'storage' (Confluence storage XHTML, sent verbatim - use it for macros, panels, layouts, "+
+				"expand blocks, status lozenges and task lists), or 'wiki' (legacy wiki markup)")),
 	)
 
 	s.AddTool(addCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -117,11 +174,14 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		representation := request.GetString("representation", "markdown")
-		if representation == "markdown" {
+		repr, err := bodyRepresentation(request, reprMarkdown, reprStorage, reprWiki)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if repr == reprMarkdown {
 			return jsonResult(client.AddCommentMarkdown(pageID, content))
 		}
-		return jsonResult(client.AddComment(pageID, content, representation))
+		return jsonResult(client.AddComment(pageID, content, repr))
 	})
 
 	deletePageTool := mcp.NewTool(
@@ -148,8 +208,16 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		mcp.WithDescription("Edit an existing Confluence comment (version is bumped automatically). "+
 			"Body is Markdown by default. Get the comment id from confluence_get_comments."),
 		mcp.WithString("comment_id", mcp.Required(), mcp.Description("ID of the comment to edit")),
+		mcp.WithNumber("expected_version", mcp.Description("Version this edit is based on (the version.number from your read). "+
+			"When set, the write is rejected if the content changed since that read instead of overwriting it; "+
+			"omit to always win the race.")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("New comment body in the given representation (Markdown by default)")),
-		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
+		mcp.WithString("representation",
+			mcp.Enum(reprMarkdown, reprStorage, reprWiki),
+			mcp.DefaultString(reprMarkdown),
+			mcp.Description("Body format: 'markdown' (default, converted by this server and lossy), "+
+				"'storage' (Confluence storage XHTML, sent verbatim - use it for macros, panels, layouts, "+
+				"expand blocks, status lozenges and task lists), or 'wiki' (legacy wiki markup)")),
 	)
 
 	s.AddTool(updateCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -162,11 +230,15 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		representation := request.GetString("representation", "markdown")
-		if representation == "markdown" {
-			return jsonResult(client.UpdateCommentMarkdown(commentID, content))
+		repr, err := bodyRepresentation(request, reprMarkdown, reprStorage, reprWiki)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return jsonResult(client.UpdateComment(commentID, content, representation))
+		expectedVersion := request.GetInt("expected_version", 0)
+		if repr == reprMarkdown {
+			return jsonResult(client.UpdateCommentMarkdownAt(commentID, content, expectedVersion))
+		}
+		return jsonResult(client.UpdateCommentAt(commentID, content, repr, expectedVersion))
 	})
 
 	deleteCommentTool := mcp.NewTool(
@@ -190,7 +262,9 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 
 	uploadAttachmentTool := mcp.NewTool(
 		"confluence_upload_attachment",
-		mcp.WithDescription("Upload a local file as an attachment on a Confluence page"),
+		mcp.WithDescription("Upload a local file as an attachment on a Confluence page. "+
+			"An attachment of the same name is updated in place (stored as a new version), "+
+			"so page markup referencing that filename keeps working."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Page ID to attach the file to")),
 		mcp.WithString("file_path", mcp.Required(), mcp.Description("Absolute path to the local file to upload")),
 	)
@@ -211,6 +285,26 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		}
 
 		return jsonResult(client.UploadAttachment(pageID, filepath.Base(filePath), data))
+	})
+
+	deleteAttachmentTool := mcp.NewTool(
+		"confluence_delete_attachment",
+		mcp.WithDescription("Delete an attachment from a Confluence page (get the attachment id from confluence_get_attachments). "+
+			"Use it to clean up attachments the page no longer references."),
+		mcp.WithString("attachment_id", mcp.Required(), mcp.Description("Attachment content id from confluence_get_attachments")),
+	)
+
+	s.AddTool(deleteAttachmentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		attachmentID, err := request.RequireString("attachment_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if err := client.DeleteAttachment(attachmentID); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Deleted attachment %s", attachmentID)), nil
 	})
 
 	addLabelTool := mcp.NewTool(
@@ -238,6 +332,9 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		mcp.WithDescription("Move a Confluence page under a new parent (title and content preserved)"),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("ID of the page to move")),
 		mcp.WithString("target_parent_id", mcp.Required(), mcp.Description("ID of the new parent page")),
+		mcp.WithNumber("expected_version", mcp.Description("Version this edit is based on (the version.number from your read). "+
+			"When set, the write is rejected if the content changed since that read instead of overwriting it; "+
+			"omit to always win the race.")),
 	)
 
 	s.AddTool(movePageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -250,7 +347,7 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.MovePage(pageID, targetParentID))
+		return jsonResult(client.MovePageAt(pageID, targetParentID, request.GetInt("expected_version", 0)))
 	})
 
 	replyToCommentTool := mcp.NewTool(
@@ -258,7 +355,12 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		mcp.WithDescription("Reply to an existing Confluence comment. Body is Markdown by default."),
 		mcp.WithString("parent_comment_id", mcp.Required(), mcp.Description("ID of the comment to reply to")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Reply body in the given representation (Markdown by default)")),
-		mcp.WithString("representation", mcp.Description("Body format: 'markdown' (default), 'storage', or 'wiki'")),
+		mcp.WithString("representation",
+			mcp.Enum(reprMarkdown, reprStorage, reprWiki),
+			mcp.DefaultString(reprMarkdown),
+			mcp.Description("Body format: 'markdown' (default, converted by this server and lossy), "+
+				"'storage' (Confluence storage XHTML, sent verbatim - use it for macros, panels, layouts, "+
+				"expand blocks, status lozenges and task lists), or 'wiki' (legacy wiki markup)")),
 	)
 
 	s.AddTool(replyToCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -271,10 +373,13 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		representation := request.GetString("representation", "markdown")
-		if representation == "markdown" {
+		repr, err := bodyRepresentation(request, reprMarkdown, reprStorage, reprWiki)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if repr == reprMarkdown {
 			return jsonResult(client.ReplyToCommentMarkdown(parentCommentID, content))
 		}
-		return jsonResult(client.ReplyToComment(parentCommentID, content, representation))
+		return jsonResult(client.ReplyToComment(parentCommentID, content, repr))
 	})
 }

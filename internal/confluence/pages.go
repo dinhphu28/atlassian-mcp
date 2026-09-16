@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // bodyField builds the Confluence REST `body` payload for the given content
@@ -44,6 +45,53 @@ func (c *Client) GetPage(pageID string) (string, error) {
 	return c.get(path)
 }
 
+// PageStorage is a page's storage-format body together with the metadata a
+// caller needs to report it or re-publish it.
+type PageStorage struct {
+	ID      string
+	Title   string
+	Space   string
+	Version int
+	Storage string
+}
+
+// GetPageStorage returns a page's storage-format body decoded out of the REST
+// envelope, so callers receive the XHTML itself rather than a JSON-escaped
+// string they would have to unescape before editing.
+func (c *Client) GetPageStorage(pageID string) (*PageStorage, error) {
+	raw, err := c.GetPage(pageID)
+	if err != nil {
+		return nil, err
+	}
+
+	var page struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Space struct {
+			Key string `json:"key"`
+		} `json:"space"`
+		Version struct {
+			Number int `json:"number"`
+		} `json:"version"`
+		Body struct {
+			Storage struct {
+				Value string `json:"value"`
+			} `json:"storage"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(raw), &page); err != nil {
+		return nil, fmt.Errorf("cannot parse page %s: %w", pageID, err)
+	}
+
+	return &PageStorage{
+		ID:      page.ID,
+		Title:   page.Title,
+		Space:   page.Space.Key,
+		Version: page.Version.Number,
+		Storage: page.Body.Storage.Value,
+	}, nil
+}
+
 // GetPageChildren lists the child pages directly under a page.
 func (c *Client) GetPageChildren(pageID string, limit int) (string, error) {
 	path := fmt.Sprintf("/rest/api/content/%s/child/page?limit=%d&expand=space,version",
@@ -77,9 +125,21 @@ func (c *Client) CreatePage(spaceKey, title, content, parentID, representation s
 	return c.do(http.MethodPost, "/rest/api/content", string(body))
 }
 
-// UpdatePage updates an existing page. The current version and space are fetched
-// automatically and the version is bumped. An empty title keeps the existing one.
+// UpdatePage updates an existing page, bumping whatever version the server
+// currently holds. An empty title keeps the existing one.
 func (c *Client) UpdatePage(pageID, content, title, representation string) (string, error) {
+	return c.UpdatePageAt(pageID, content, title, representation, 0)
+}
+
+// UpdatePageAt updates an existing page. The current space (and title, when
+// none is given) are fetched automatically.
+//
+// expectedVersion is the version the edit was derived from: when it is greater
+// than zero the write is sent as that version plus one, so Confluence rejects it
+// if the page has moved on in the meantime instead of silently overwriting
+// someone else's edit. Zero keeps the fetch-and-bump behaviour, which always
+// wins the race.
+func (c *Client) UpdatePageAt(pageID, content, title, representation string, expectedVersion int) (string, error) {
 	raw, err := c.get("/rest/api/content/" + url.PathEscape(pageID) + "?expand=version,space")
 	if err != nil {
 		return "", err
@@ -107,12 +167,72 @@ func (c *Client) UpdatePage(pageID, content, title, representation string) (stri
 		"type":    "page",
 		"title":   title,
 		"space":   map[string]any{"key": current.Space.Key},
-		"version": map[string]any{"number": current.Version.Number + 1},
+		"version": map[string]any{"number": nextVersion(current.Version.Number, expectedVersion)},
 		"body":    bodyField(representation, content),
 	}
 
 	body := marshalPayload(payload)
+	res, err := c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(pageID), string(body))
+	return res, versionConflict(err, expectedVersion)
+}
+
+// RenamePage changes only a page's title, re-sending the body Confluence already
+// holds so the page is not blanked by an update that carries no content.
+func (c *Client) RenamePage(pageID, title string) (string, error) {
+	raw, err := c.get("/rest/api/content/" + url.PathEscape(pageID) + "?expand=version,space,body.storage")
+	if err != nil {
+		return "", err
+	}
+
+	var current struct {
+		Space struct {
+			Key string `json:"key"`
+		} `json:"space"`
+		Version struct {
+			Number int `json:"number"`
+		} `json:"version"`
+		Body struct {
+			Storage struct {
+				Value          string `json:"value"`
+				Representation string `json:"representation"`
+			} `json:"storage"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(raw), &current); err != nil {
+		return "", fmt.Errorf("cannot parse current page: %w", err)
+	}
+
+	payload := map[string]any{
+		"id":      pageID,
+		"type":    "page",
+		"title":   title,
+		"space":   map[string]any{"key": current.Space.Key},
+		"version": map[string]any{"number": current.Version.Number + 1},
+		"body":    bodyField(current.Body.Storage.Representation, current.Body.Storage.Value),
+	}
+
+	body := marshalPayload(payload)
 	return c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(pageID), string(body))
+}
+
+// nextVersion is the version number to send for an update: one past the version
+// the caller based the edit on, or one past the server's current version when
+// the caller did not say.
+func nextVersion(serverVersion, expectedVersion int) int {
+	if expectedVersion > 0 {
+		return expectedVersion + 1
+	}
+	return serverVersion + 1
+}
+
+// versionConflict rewrites Confluence's 409 into an actionable message: the
+// content changed under the caller, so the edit has to be rebased on a fresh
+// read rather than retried as-is.
+func versionConflict(err error, expectedVersion int) error {
+	if err == nil || expectedVersion <= 0 || !strings.Contains(err.Error(), "confluence error 409") {
+		return err
+	}
+	return fmt.Errorf("content changed since version %d; re-read it and redo the edit: %w", expectedVersion, err)
 }
 
 // AddComment posts a comment on a page.
@@ -133,9 +253,16 @@ func (c *Client) DeletePage(pageID string) error {
 	return err
 }
 
-// UpdateComment edits an existing comment. The current version is fetched
-// automatically and bumped. representation is the body format, e.g. "storage".
+// UpdateComment edits an existing comment, bumping whatever version the server
+// currently holds. representation is the body format, e.g. "storage".
 func (c *Client) UpdateComment(commentID, content, representation string) (string, error) {
+	return c.UpdateCommentAt(commentID, content, representation, 0)
+}
+
+// UpdateCommentAt edits an existing comment. expectedVersion has the same
+// meaning as in UpdatePageAt: greater than zero makes the write fail rather
+// than overwrite a comment that changed since it was read.
+func (c *Client) UpdateCommentAt(commentID, content, representation string, expectedVersion int) (string, error) {
 	raw, err := c.get("/rest/api/content/" + url.PathEscape(commentID) + "?expand=version")
 	if err != nil {
 		return "", err
@@ -153,12 +280,13 @@ func (c *Client) UpdateComment(commentID, content, representation string) (strin
 	payload := map[string]any{
 		"id":      commentID,
 		"type":    "comment",
-		"version": map[string]any{"number": current.Version.Number + 1},
+		"version": map[string]any{"number": nextVersion(current.Version.Number, expectedVersion)},
 		"body":    bodyField(representation, content),
 	}
 
 	body := marshalPayload(payload)
-	return c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(commentID), string(body))
+	res, err := c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(commentID), string(body))
+	return res, versionConflict(err, expectedVersion)
 }
 
 // DeleteComment deletes a comment by ID.
@@ -185,8 +313,15 @@ func (c *Client) GetPageHistory(pageID string, limit int) (string, error) {
 }
 
 // MovePage re-parents a page under targetParentID, preserving its title and
-// content. The current version is fetched and bumped automatically.
+// content, bumping whatever version the server currently holds.
 func (c *Client) MovePage(pageID, targetParentID string) (string, error) {
+	return c.MovePageAt(pageID, targetParentID, 0)
+}
+
+// MovePageAt re-parents a page. expectedVersion has the same meaning as in
+// UpdatePageAt: greater than zero makes the move fail rather than re-publish a
+// body that changed since it was read.
+func (c *Client) MovePageAt(pageID, targetParentID string, expectedVersion int) (string, error) {
 	raw, err := c.get("/rest/api/content/" + url.PathEscape(pageID) + "?expand=version,space,body.storage")
 	if err != nil {
 		return "", err
@@ -216,13 +351,14 @@ func (c *Client) MovePage(pageID, targetParentID string) (string, error) {
 		"type":      "page",
 		"title":     current.Title,
 		"space":     map[string]any{"key": current.Space.Key},
-		"version":   map[string]any{"number": current.Version.Number + 1},
+		"version":   map[string]any{"number": nextVersion(current.Version.Number, expectedVersion)},
 		"ancestors": []map[string]any{{"id": targetParentID}},
 		"body":      bodyField(current.Body.Storage.Representation, current.Body.Storage.Value),
 	}
 
 	body := marshalPayload(payload)
-	return c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(pageID), string(body))
+	res, err := c.do(http.MethodPut, "/rest/api/content/"+url.PathEscape(pageID), string(body))
+	return res, versionConflict(err, expectedVersion)
 }
 
 // ReplyToComment posts a reply to an existing comment. The parent comment's

@@ -156,8 +156,8 @@ On Windows the command path will be the `.exe`, e.g.
 
 ## Tools
 
-All tools are read-only and authenticate with the configured Personal Access
-Token.
+All tools authenticate with the configured Personal Access Token. Write tools
+are registered only when `read_only` is false for that product.
 
 ### Markdown workflow (token-efficient)
 
@@ -171,7 +171,28 @@ storage XHTML, cutting token usage on both reads and writes.
 - **Read to a file:** pass `output_path` to `confluence_get_page` to write the
   Markdown to disk (returns metadata only), so large pages never fill context.
 - **Exact fidelity:** pass `representation="storage"` on reads/writes to bypass
-  Markdown conversion.
+  Markdown conversion. `output_path` works here too (it writes the raw storage
+  XHTML), and `body_only=true` returns just the XHTML without the REST envelope.
+
+### When to use storage format
+
+Markdown cannot express most Confluence-native constructs: macros (info/note/
+warning panels, expand, TOC, excerpt, include), page layouts and columns, status
+lozenges, task lists, user mentions and page links. Reading such a page as
+Markdown flattens or drops them, and writing that Markdown back **removes them
+from the page**.
+
+So for a page that contains them, use the storage round trip:
+
+1. `confluence_get_page(page_id, representation="storage", output_path="page.xhtml")`
+2. edit `page.xhtml` — it is Confluence storage XHTML, passed through verbatim
+3. `confluence_update_page(page_id, file_path="page.xhtml", representation="storage",
+   expected_version=<version from step 1>)`
+
+Markdown reads of an affected page are prefixed with an inert
+`<!-- confluence-mcp: … -->` comment naming what the conversion lost, so this
+decision does not require reading the page twice. `expected_version` makes the
+write fail instead of overwriting a page that changed since the read.
 
 **Images:** `![alt](name.png)` references a page attachment (upload it first
 with `confluence_upload_attachment`); `![alt](https://…)` embeds an external URL.

@@ -62,8 +62,63 @@ func (c *Client) DownloadAttachment(attachmentID string) (*Attachment, error) {
 	}, nil
 }
 
+// AttachmentID returns the content ID of the attachment named filename on a
+// page, or an empty string when the page has no attachment by that name.
+func (c *Client) AttachmentID(pageID, filename string) (string, error) {
+	raw, err := c.get(fmt.Sprintf("/rest/api/content/%s/child/attachment?limit=200&filename=%s",
+		url.PathEscape(pageID), url.QueryEscape(filename)))
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		Results []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return "", fmt.Errorf("cannot parse attachments of %s: %w", pageID, err)
+	}
+
+	// Confluence applies the filename filter server-side; the title is checked
+	// again so an ignored filter cannot hand back the wrong attachment.
+	for _, r := range resp.Results {
+		if r.Title == filename {
+			return r.ID, nil
+		}
+	}
+
+	return "", nil
+}
+
 // UploadAttachment uploads bytes as an attachment named filename on a page.
+// Confluence rejects a second attachment with the same name, so an existing one
+// is updated instead: the bytes become a new version of it and the name stays
+// the same, which keeps any page markup that references it working.
 func (c *Client) UploadAttachment(pageID, filename string, data []byte) (string, error) {
+	base := "/rest/api/content/" + url.PathEscape(pageID) + "/child/attachment"
+
+	existingID, err := c.AttachmentID(pageID, filename)
+	if err != nil {
+		return "", err
+	}
+	if existingID != "" {
+		return c.uploadMultipart(base+"/"+url.PathEscape(existingID)+"/data", filename, data)
+	}
+
+	return c.uploadMultipart(base, filename, data)
+}
+
+// DeleteAttachment removes an attachment by its content ID.
+func (c *Client) DeleteAttachment(attachmentID string) error {
+	_, err := c.do(http.MethodDelete, "/rest/api/content/"+url.PathEscape(attachmentID), "")
+	return err
+}
+
+// uploadMultipart sends data as a multipart file upload to path and returns the
+// raw response body.
+func (c *Client) uploadMultipart(path, filename string, data []byte) (string, error) {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 
@@ -78,8 +133,7 @@ func (c *Client) UploadAttachment(pageID, filename string, data []byte) (string,
 		return "", err
 	}
 
-	req, err := http.NewRequest(http.MethodPost,
-		c.baseURL+"/rest/api/content/"+url.PathEscape(pageID)+"/child/attachment", &buf)
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+path, &buf)
 	if err != nil {
 		return "", err
 	}

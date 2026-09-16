@@ -141,9 +141,10 @@ func TestRenderAndUploadWarnsOnUploadError(t *testing.T) {
 	}
 }
 
-// A transient render failure on update must not downgrade a page that already
-// has a working image: the existing attachment is reused instead.
-func TestUpdatePageMarkdownReusesExistingImageOnRenderFailure(t *testing.T) {
+// A diagram whose image is already attached is reused without being rendered
+// again, so an update keeps working (and keeps the image) even when mmdc is
+// unavailable.
+func TestUpdatePageMarkdownReusesExistingImageWithoutRendering(t *testing.T) {
 	md := "```mermaid\ngraph TD;A-->B;\n```\n"
 	_, diagrams, _ := markdown.ToStorage(md)
 	name := diagramFilename(diagrams[0].Source)
@@ -165,10 +166,17 @@ func TestUpdatePageMarkdownReusesExistingImageOnRenderFailure(t *testing.T) {
 	c, srv := newTestClient(h)
 	defer srv.Close()
 
-	failing := func(string) ([]byte, error) { return nil, fmt.Errorf("mmdc blew up") }
+	rendered := false
+	failing := func(string) ([]byte, error) {
+		rendered = true
+		return nil, fmt.Errorf("mmdc blew up")
+	}
 	_, warnings, err := c.UpdatePageMarkdown("1", md, "", failing)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if rendered {
+		t.Error("re-rendered a diagram whose image is already attached")
 	}
 	if !strings.Contains(putBody, `<ri:attachment ri:filename=\"`+name+`\"/>`) {
 		t.Errorf("expected existing image preserved, got: %s", putBody)
@@ -176,8 +184,8 @@ func TestUpdatePageMarkdownReusesExistingImageOnRenderFailure(t *testing.T) {
 	if strings.Contains(putBody, `ac:name=\"code\"`) {
 		t.Errorf("render failure downgraded page to a code macro: %s", putBody)
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "reused existing attachment") {
-		t.Errorf("expected a reuse warning, got %v", warnings)
+	if len(warnings) != 0 {
+		t.Errorf("expected no warning when the image is reused, got %v", warnings)
 	}
 }
 

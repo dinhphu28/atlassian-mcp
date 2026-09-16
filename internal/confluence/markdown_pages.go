@@ -61,6 +61,13 @@ func (c *Client) CreatePageMarkdown(spaceKey, title, md, parentID string, render
 // the existing image is reused rather than downgrading the page to a code macro.
 // The returned warnings list any diagram that did not become an image.
 func (c *Client) UpdatePageMarkdown(pageID, md, title string, render MermaidRenderer) (string, []string, error) {
+	return c.UpdatePageMarkdownAt(pageID, md, title, render, 0)
+}
+
+// UpdatePageMarkdownAt is UpdatePageMarkdown with the optimistic-locking
+// behaviour of UpdatePageAt: expectedVersion greater than zero makes the write
+// fail if the page changed since it was read.
+func (c *Client) UpdatePageMarkdownAt(pageID, md, title string, render MermaidRenderer, expectedVersion int) (string, []string, error) {
 	storage, diagrams, err := markdown.ToStorage(md)
 	if err != nil {
 		return "", nil, err
@@ -76,7 +83,7 @@ func (c *Client) UpdatePageMarkdown(pageID, md, title string, render MermaidRend
 		}
 	}
 	final := applyDiagrams(storage, diagrams, filenames)
-	updated, err := c.UpdatePage(pageID, final, title, "storage")
+	updated, err := c.UpdatePageAt(pageID, final, title, "storage", expectedVersion)
 	if err != nil {
 		return "", warnings, err
 	}
@@ -108,23 +115,30 @@ func diagramFilename(source string) string {
 
 // renderAndUpload renders each diagram and uploads successful renders as
 // attachments, returning placeholder -> filename for the images now available.
-// existing is the set of attachment filenames already on the page: when a render
-// or upload fails but a matching attachment already exists, it is reused instead
-// of falling back to a code macro. The second return value lists a warning for
-// each diagram that failed, whether or not an existing image rescued it.
+// existing is the set of attachment filenames already on the page; a diagram
+// whose image is already there is reused as-is. The second return value lists a
+// warning for each diagram that had to degrade to a code macro.
 func renderAndUpload(c *Client, pageID string, diagrams []markdown.Diagram, render MermaidRenderer, existing map[string]bool) (map[string]string, []string) {
 	filenames := map[string]string{}
 	var warnings []string
 	for i, d := range diagrams {
 		name := diagramFilename(d.Source)
 
+		// The name is a hash of the diagram source, so an attachment already
+		// carrying it is this exact image: reuse it instead of re-rendering and
+		// storing another identical version.
+		if existing[name] {
+			filenames[d.Placeholder] = name
+			continue
+		}
+
 		png, err := render(d.Source)
 		if err != nil {
-			warnings = append(warnings, reuseOrWarn(filenames, existing, d.Placeholder, name, i, "render", err))
+			warnings = append(warnings, codeBlockWarning(i, "render", err))
 			continue
 		}
 		if _, err := c.UploadAttachment(pageID, name, png); err != nil {
-			warnings = append(warnings, reuseOrWarn(filenames, existing, d.Placeholder, name, i, "upload", err))
+			warnings = append(warnings, codeBlockWarning(i, "upload", err))
 			continue
 		}
 		filenames[d.Placeholder] = name
@@ -132,15 +146,9 @@ func renderAndUpload(c *Client, pageID string, diagrams []markdown.Diagram, rend
 	return filenames, warnings
 }
 
-// reuseOrWarn records a fallback for a failed diagram: if the attachment already
-// exists on the page it is reused (keeping the page an image) and the warning
-// notes that; otherwise the diagram degrades to a code macro. It returns the
-// warning message.
-func reuseOrWarn(filenames map[string]string, existing map[string]bool, placeholder, name string, i int, stage string, cause error) string {
-	if existing[name] {
-		filenames[placeholder] = name
-		return fmt.Sprintf("diagram %d: %s failed (%v); reused existing attachment %s", i, stage, cause, name)
-	}
+// codeBlockWarning reports that a diagram degraded to a code macro because the
+// named stage failed and the page carries no image for it to fall back on.
+func codeBlockWarning(i int, stage string, cause error) string {
 	return fmt.Sprintf("diagram %d: %s failed, rendered as code block: %v", i, stage, cause)
 }
 
@@ -197,11 +205,17 @@ func (c *Client) ReplyToCommentMarkdown(parentCommentID, md string) (string, err
 
 // UpdateCommentMarkdown edits a comment using Markdown.
 func (c *Client) UpdateCommentMarkdown(commentID, md string) (string, error) {
+	return c.UpdateCommentMarkdownAt(commentID, md, 0)
+}
+
+// UpdateCommentMarkdownAt is UpdateCommentMarkdown with the optimistic-locking
+// behaviour of UpdateCommentAt.
+func (c *Client) UpdateCommentMarkdownAt(commentID, md string, expectedVersion int) (string, error) {
 	storage, err := markdownComment(md)
 	if err != nil {
 		return "", err
 	}
-	return c.UpdateComment(commentID, storage, "storage")
+	return c.UpdateCommentAt(commentID, storage, "storage", expectedVersion)
 }
 
 // markdownComment converts comment Markdown to storage, degrading any Mermaid
@@ -240,13 +254,16 @@ func indexOf(s, sub string) int {
 }
 
 // PageMarkdown is a page rendered as Markdown plus the metadata needed to
-// update it without a second fetch.
+// update it without a second fetch. Dropped names the Confluence constructs the
+// conversion could not represent, so a caller can decide to re-read the page as
+// storage instead of editing a body that has already lost them.
 type PageMarkdown struct {
 	ID       string
 	Title    string
 	Space    string
 	Version  int
 	Markdown string
+	Dropped  []string
 }
 
 // GetPageMarkdown fetches a page and returns its body converted to Markdown.
@@ -286,6 +303,7 @@ func (c *Client) GetPageMarkdown(pageID string) (*PageMarkdown, error) {
 		Space:    p.Space.Key,
 		Version:  p.Version.Number,
 		Markdown: md,
+		Dropped:  markdown.UntranslatedMacros(p.Body.Storage.Value),
 	}, nil
 }
 

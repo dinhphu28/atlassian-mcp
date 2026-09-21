@@ -22,6 +22,7 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		mcp.WithString("description", mcp.Description("Issue description (Jira wiki markup)")),
 		mcp.WithString("parent_key", mcp.Description("Parent issue key (e.g. DEV-123); required when issue_type is a sub-task")),
 		mcp.WithString("assignee", mcp.Description("Optional Jira username to assign the new issue to")),
+		mcp.WithString("priority", mcp.Description("Optional priority name (e.g. High) or id; see jira_get_priorities")),
 	)
 
 	s.AddTool(createIssueTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -43,6 +44,7 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 			request.GetString("description", ""),
 			request.GetString("parent_key", ""),
 			request.GetString("assignee", ""),
+			request.GetString("priority", ""),
 		))
 	})
 
@@ -333,5 +335,30 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("Deleted worklog %s on %s", worklogID, key)), nil
+	})
+
+	setPriorityTool := mcp.NewTool(
+		"jira_set_priority",
+		mcp.WithDescription("Set a Jira issue's priority (list the instance's priorities with jira_get_priorities)"),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithString("priority", mcp.Required(), mcp.Description("Priority name, e.g. High (case-insensitive), or a numeric priority id")),
+	)
+
+	s.AddTool(setPriorityTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		priority, err := request.RequireString("priority")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		msg, err := client.SetPriority(key, priority)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(msg), nil
 	})
 }

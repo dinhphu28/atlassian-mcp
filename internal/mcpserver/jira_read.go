@@ -128,6 +128,15 @@ func registerJiraReadTools(s *server.MCPServer, client *jira.Client) {
 
 		return jiraAttachmentsResult(client, metas, true)
 	})
+
+	getPrioritiesTool := mcp.NewTool(
+		"jira_get_priorities",
+		mcp.WithDescription("List the priorities configured on this Jira instance (names and ids for jira_set_priority)"),
+	)
+
+	s.AddTool(getPrioritiesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return jsonResult(client.GetPriorities())
+	})
 }
 
 // jiraAttachmentsResult downloads the given attachments and builds a multi-block

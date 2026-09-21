@@ -26,8 +26,9 @@ func (c *Client) GetComments(key string) (string, error) {
 // CreateIssue creates an issue in the given project. description is optional and
 // uses Jira wiki markup. parentKey is optional and required only for sub-task
 // issue types, which Jira rejects unless a parent is supplied at creation time.
-// assignee is an optional Jira username to assign the new issue to.
-func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey, assignee string) (string, error) {
+// assignee is an optional Jira username to assign the new issue to, and
+// priority an optional priority name or id (Jira's default applies if empty).
+func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey, assignee, priority string) (string, error) {
 	fields := map[string]any{
 		"project":   map[string]any{"key": projectKey},
 		"issuetype": map[string]any{"name": issueType},
@@ -41,6 +42,13 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 	}
 	if assignee != "" {
 		fields["assignee"] = map[string]any{"name": assignee}
+	}
+	if priority != "" {
+		ref, err := c.resolvePriority(priority)
+		if err != nil {
+			return "", err
+		}
+		fields["priority"] = ref
 	}
 
 	body, _ := json.Marshal(map[string]any{"fields": fields})

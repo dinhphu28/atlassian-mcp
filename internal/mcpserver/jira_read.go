@@ -137,6 +137,16 @@ func registerJiraReadTools(s *server.MCPServer, client *jira.Client) {
 	s.AddTool(getPrioritiesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return jsonResult(client.GetPriorities())
 	})
+
+	getIssueLinkTypesTool := mcp.NewTool(
+		"jira_get_issue_link_types",
+		mcp.WithDescription("List the issue link types configured on this Jira instance "+
+			"(names and direction descriptions, e.g. Blocks / 'blocks' / 'is blocked by', for jira_link_issues)"),
+	)
+
+	s.AddTool(getIssueLinkTypesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return jsonResult(client.GetIssueLinkTypes())
+	})
 }
 
 // jiraAttachmentsResult downloads the given attachments and builds a multi-block

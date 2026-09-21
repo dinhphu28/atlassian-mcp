@@ -361,4 +361,57 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 
 		return mcp.NewToolResultText(msg), nil
 	})
+
+	linkIssuesTool := mcp.NewTool(
+		"jira_link_issues",
+		mcp.WithDescription("Link two Jira issues. The arguments read as a sentence: "+
+			"issue_key link_type target_issue_key, e.g. DEV-1 'blocks' DEV-2. "+
+			"List the available types with jira_get_issue_link_types."),
+		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key the link starts from (e.g. DEV-123)")),
+		mcp.WithString("link_type", mcp.Required(), mcp.Description(
+			"Link type name (e.g. Blocks), its id, or a direction description (e.g. 'blocks', 'is blocked by', 'relates to')")),
+		mcp.WithString("target_issue_key", mcp.Required(), mcp.Description("Issue key the link points at (e.g. DEV-456)")),
+		mcp.WithString("comment", mcp.Description("Optional comment (Jira wiki markup) to post with the link")),
+	)
+
+	s.AddTool(linkIssuesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		key, err := request.RequireString("issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		linkType, err := request.RequireString("link_type")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		targetKey, err := request.RequireString("target_issue_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		msg, err := client.LinkIssues(key, linkType, targetKey, request.GetString("comment", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(msg), nil
+	})
+
+	deleteIssueLinkTool := mcp.NewTool(
+		"jira_delete_issue_link",
+		mcp.WithDescription("Delete an issue link by id (the ids are in an issue's 'issuelinks' field from jira_get_issue)"),
+		mcp.WithString("link_id", mcp.Required(), mcp.Description("Issue link id from an issue's issuelinks field")),
+	)
+
+	s.AddTool(deleteIssueLinkTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		linkID, err := request.RequireString("link_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if err := client.DeleteIssueLink(linkID); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Deleted issue link %s", linkID)), nil
+	})
 }

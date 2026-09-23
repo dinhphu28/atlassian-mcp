@@ -15,9 +15,14 @@ import (
 func registerJiraReadTools(s *server.MCPServer, client *jira.Client) {
 	searchTool := mcp.NewTool(
 		"jira_search",
-		mcp.WithDescription("Search Jira issues with a JQL query"),
+		mcp.WithDescription("Search Jira issues with a JQL query. Page with start_at, and prefer naming the "+
+			"fields you need: by default Jira returns every field of every issue, so a fields selector such as "+
+			"'summary,status,assignee' cuts the response size dramatically."),
 		mcp.WithString("jql", mcp.Required(), mcp.Description("JQL expression, e.g. 'project = DEV AND status = Open ORDER BY created DESC'")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of issues (default 25)")),
+		mcp.WithNumber("start_at", mcp.Description("0-based index of the first issue to return (default 0); use it with limit to page")),
+		mcp.WithString("fields", mcp.Description("Comma-separated fields to return, e.g. 'summary,status,assignee'. "+
+			"Omit for every field (much larger); '*all' and '-field' exclusions also work.")),
 	)
 
 	s.AddTool(searchTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -26,7 +31,12 @@ func registerJiraReadTools(s *server.MCPServer, client *jira.Client) {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.Search(jql, request.GetInt("limit", 25)))
+		return jsonResult(client.Search(
+			jql,
+			request.GetInt("limit", 25),
+			request.GetInt("start_at", 0),
+			request.GetString("fields", ""),
+		))
 	})
 
 	getIssueTool := mcp.NewTool(
@@ -61,8 +71,11 @@ func registerJiraReadTools(s *server.MCPServer, client *jira.Client) {
 
 	getTransitionsTool := mcp.NewTool(
 		"jira_get_transitions",
-		mcp.WithDescription("List the status transitions available for a Jira issue (ids for jira_transition_issue)"),
+		mcp.WithDescription("List the status transitions available for a Jira issue (ids for jira_transition_issue). "+
+			"Set expand_fields to see each transition's screen fields, i.e. what jira_transition_issue must supply "+
+			"(a required 'resolution' is the usual one)."),
 		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
+		mcp.WithBoolean("expand_fields", mcp.Description("Include each transition's screen fields, with their allowed values and whether they are required (default false)")),
 	)
 
 	s.AddTool(getTransitionsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -71,7 +84,7 @@ func registerJiraReadTools(s *server.MCPServer, client *jira.Client) {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.GetTransitions(key))
+		return jsonResult(client.GetTransitions(key, request.GetBool("expand_fields", false)))
 	})
 
 	getWorklogsTool := mcp.NewTool(

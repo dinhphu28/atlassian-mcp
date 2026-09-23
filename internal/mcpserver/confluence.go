@@ -10,7 +10,11 @@ import (
 // registered; write tools are skipped when readOnly is true.
 func RegisterConfluence(s *server.MCPServer, client *confluence.Client, readOnly bool) {
 	registerConfluenceReadTools(s, client)
+	registerConfluenceSpaceReadTools(s, client)
+	registerConfluenceContentReadTools(s, client)
 	if !readOnly {
 		registerConfluenceWriteTools(s, client)
+		registerConfluenceSpaceWriteTools(s, client)
+		registerConfluenceContentWriteTools(s, client)
 	}
 }

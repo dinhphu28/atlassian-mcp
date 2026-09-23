@@ -52,14 +52,20 @@ func bodyArgument(request mcp.CallToolRequest) (string, bool, error) {
 func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client) {
 	createPageTool := mcp.NewTool(
 		"confluence_create_page",
-		mcp.WithDescription("Create a new Confluence page. Body is Markdown by default; "+
+		mcp.WithDescription("Create a new Confluence page or blog post. Body is Markdown by default; "+
 			"```mermaid blocks are rendered to images when mmdc is installed."),
 		mcp.WithString("space_key", mcp.Required(), mcp.Description("Key of the space to create the page in")),
 		mcp.WithString("title", mcp.Required(), mcp.Description("Page title")),
 		mcp.WithString("content", mcp.Description("Page body in the given representation (Markdown by default). Ignored when file_path is set.")),
 		mcp.WithString("file_path", mcp.Description("Optional path to a local file to publish instead of inline content. "+
 			"Read in the chosen representation: Markdown by default, Confluence storage XHTML when representation='storage'.")),
-		mcp.WithString("parent_id", mcp.Description("Optional parent page ID to nest under")),
+		mcp.WithString("parent_id", mcp.Description("Optional parent page ID to nest under. "+
+			"Not allowed with content_type 'blogpost', which always sits at the root of its space.")),
+		mcp.WithString("content_type",
+			mcp.Enum(confluence.ContentTypePage, confluence.ContentTypeBlogpost),
+			mcp.DefaultString(confluence.ContentTypePage),
+			mcp.Description("What to create: 'page' (default) or 'blogpost' (a dated blog post in the space, "+
+				"which takes no parent_id)")),
 		mcp.WithString("representation",
 			mcp.Enum(reprMarkdown, reprStorage, reprWiki),
 			mcp.DefaultString(reprMarkdown),
@@ -90,10 +96,11 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 		}
 
 		parentID := request.GetString("parent_id", "")
+		contentType := request.GetString("content_type", confluence.ContentTypePage)
 		if repr == reprMarkdown {
-			return markdownPageResult(client.CreatePageMarkdown(spaceKey, title, content, parentID, mermaidRenderer()))
+			return markdownPageResult(client.CreatePageMarkdown(spaceKey, title, content, parentID, contentType, mermaidRenderer()))
 		}
-		return jsonResult(client.CreatePage(spaceKey, title, content, parentID, repr))
+		return jsonResult(client.CreatePage(spaceKey, title, content, parentID, repr, contentType))
 	})
 
 	updatePageTool := mcp.NewTool(
@@ -186,8 +193,12 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 
 	deletePageTool := mcp.NewTool(
 		"confluence_delete_page",
-		mcp.WithDescription("Delete a Confluence page by ID (moves it to the trash)"),
+		mcp.WithDescription("Delete a Confluence page by ID. By default the page is moved to the space trash, "+
+			"where a space admin can still restore it. With purge=true it is deleted from the trash as well, "+
+			"which destroys it permanently: there is nothing left to restore."),
 		mcp.WithString("page_id", mcp.Required(), mcp.Description("Confluence page ID to delete")),
+		mcp.WithBoolean("purge", mcp.Description("Also remove the page from the trash, deleting it permanently "+
+			"and irreversibly (default false, which leaves it recoverable in the trash)")),
 	)
 
 	s.AddTool(deletePageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -196,11 +207,18 @@ func registerConfluenceWriteTools(s *server.MCPServer, client *confluence.Client
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		if request.GetBool("purge", false) {
+			if err := client.PurgePage(pageID); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText(fmt.Sprintf("Purged page %s (deleted permanently, not recoverable from the trash)", pageID)), nil
+		}
+
 		if err := client.DeletePage(pageID); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return mcp.NewToolResultText(fmt.Sprintf("Deleted page %s", pageID)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("Deleted page %s (moved to the trash)", pageID)), nil
 	})
 
 	updateCommentTool := mcp.NewTool(

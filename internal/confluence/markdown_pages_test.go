@@ -258,7 +258,7 @@ func TestGetCommentsMarkdownConverts(t *testing.T) {
 	c, srv := newTestClient(h)
 	defer srv.Close()
 
-	got, err := c.GetCommentsMarkdown("7", 25)
+	got, err := c.GetCommentsMarkdown("7", 25, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestGetCommentsMarkdownIncludesAuthorDateAndNesting(t *testing.T) {
 	c, srv := newTestClient(h)
 	defer srv.Close()
 
-	got, err := c.GetCommentsMarkdown("7", 25)
+	got, err := c.GetCommentsMarkdown("7", 25, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

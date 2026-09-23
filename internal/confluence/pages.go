@@ -31,26 +31,95 @@ func marshalPayload(v any) []byte {
 	return bytes.TrimRight(buf.Bytes(), "\n")
 }
 
-// Search runs a CQL query and returns up to limit results.
-func (c *Client) Search(cql string, limit int) (string, error) {
-	path := fmt.Sprintf("/rest/api/content/search?limit=%d&expand=space,version&cql=%s",
-		limit, url.QueryEscape(cql))
+// Confluence content types this client writes. A blog post is a separate type,
+// not a page with a flag, and it has no ancestors.
+const (
+	ContentTypePage     = "page"
+	ContentTypeBlogpost = "blogpost"
+)
+
+// resolveContentType normalises the content type a caller asked for. An empty
+// value means a page, so existing callers keep their behaviour.
+//
+// A blog post lives at the root of its space and cannot be nested, so pairing
+// one with a parent is rejected here: Confluence would otherwise answer with an
+// opaque error that does not say which of the two arguments was wrong.
+func resolveContentType(contentType, parentID string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "", ContentTypePage:
+		return ContentTypePage, nil
+	case ContentTypeBlogpost, "blog", "blog post":
+		if parentID != "" {
+			return "", fmt.Errorf("a %s has no parent page; omit parent_id, or use content_type %q",
+				ContentTypeBlogpost, ContentTypePage)
+		}
+		return ContentTypeBlogpost, nil
+	default:
+		return "", fmt.Errorf("unknown content_type %q; use %q or %q",
+			contentType, ContentTypePage, ContentTypeBlogpost)
+	}
+}
+
+// contentTypeOf is the type an update has to echo back: whatever Confluence
+// reports the content to be, defaulting to a page when the response carries no
+// type. Hardcoding "page" would corrupt or fail an update to a blog post.
+func contentTypeOf(current string) string {
+	if current == "" {
+		return ContentTypePage
+	}
+	return current
+}
+
+// startParam is the offset parameter for a paged list endpoint. The first page
+// adds nothing, so requests that do not page are byte-for-byte what they were.
+func startParam(start int) string {
+	if start <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("&start=%d", start)
+}
+
+// contentPath builds the read path for one content item, selecting an older
+// revision when version is greater than zero. Confluence serves a historical
+// revision only when status=historical accompanies the version number; sending
+// the version alone silently returns the current content instead.
+func contentPath(contentID, expand string, version int) string {
+	path := "/rest/api/content/" + url.PathEscape(contentID) + "?expand=" + expand
+	if version > 0 {
+		path += fmt.Sprintf("&status=historical&version=%d", version)
+	}
+	return path
+}
+
+// Search runs a CQL query and returns up to limit results, starting at the
+// zero-based offset start (advance it by limit to follow _links.next).
+func (c *Client) Search(cql string, limit, start int) (string, error) {
+	path := fmt.Sprintf("/rest/api/content/search?limit=%d&expand=space,version&cql=%s%s",
+		limit, url.QueryEscape(cql), startParam(start))
 	return c.get(path)
 }
 
 // GetPage returns a single page by ID, including its storage-format body.
 func (c *Client) GetPage(pageID string) (string, error) {
-	path := "/rest/api/content/" + url.PathEscape(pageID) +
-		"?expand=space,version,body.storage"
-	return c.get(path)
+	return c.GetPageAt(pageID, 0)
+}
+
+// GetPageAt returns a page by ID including its storage-format body. A version
+// greater than zero reads that historical revision (the version numbers come
+// from GetPageHistory) rather than the current content.
+func (c *Client) GetPageAt(pageID string, version int) (string, error) {
+	return c.get(contentPath(pageID, "space,version,body.storage", version))
 }
 
 // PageStorage is a page's storage-format body together with the metadata a
 // caller needs to report it or re-publish it.
 type PageStorage struct {
-	ID      string
-	Title   string
-	Space   string
+	ID    string
+	Title string
+	Space string
+	// Type is the content type Confluence reports, "page" or "blogpost", so a
+	// caller re-publishing the body does not turn a blog post into a page.
+	Type    string
 	Version int
 	Storage string
 }
@@ -59,13 +128,21 @@ type PageStorage struct {
 // envelope, so callers receive the XHTML itself rather than a JSON-escaped
 // string they would have to unescape before editing.
 func (c *Client) GetPageStorage(pageID string) (*PageStorage, error) {
-	raw, err := c.GetPage(pageID)
+	return c.GetPageStorageAt(pageID, 0)
+}
+
+// GetPageStorageAt is GetPageStorage for one revision: a version greater than
+// zero returns that historical body, which is what a restore does before
+// writing it back with UpdatePage.
+func (c *Client) GetPageStorageAt(pageID string, version int) (*PageStorage, error) {
+	raw, err := c.GetPageAt(pageID, version)
 	if err != nil {
 		return nil, err
 	}
 
 	var page struct {
 		ID    string `json:"id"`
+		Type  string `json:"type"`
 		Title string `json:"title"`
 		Space struct {
 			Key string `json:"key"`
@@ -85,6 +162,7 @@ func (c *Client) GetPageStorage(pageID string) (*PageStorage, error) {
 
 	return &PageStorage{
 		ID:      page.ID,
+		Type:    page.Type,
 		Title:   page.Title,
 		Space:   page.Space.Key,
 		Version: page.Version.Number,
@@ -92,27 +170,44 @@ func (c *Client) GetPageStorage(pageID string) (*PageStorage, error) {
 	}, nil
 }
 
-// GetPageChildren lists the child pages directly under a page.
-func (c *Client) GetPageChildren(pageID string, limit int) (string, error) {
-	path := fmt.Sprintf("/rest/api/content/%s/child/page?limit=%d&expand=space,version",
-		url.PathEscape(pageID), limit)
+// GetPageChildren lists the child pages directly under a page, starting at the
+// zero-based offset start.
+func (c *Client) GetPageChildren(pageID string, limit, start int) (string, error) {
+	path := fmt.Sprintf("/rest/api/content/%s/child/page?limit=%d&expand=space,version%s",
+		url.PathEscape(pageID), limit, startParam(start))
 	return c.get(path)
 }
 
-// GetComments returns the comments on a page. depth=all includes nested replies
-// (children of comments), not just top-level comments; history carries each
-// comment's author and created date, and ancestors gives its reply chain.
-func (c *Client) GetComments(pageID string, limit int) (string, error) {
-	path := fmt.Sprintf("/rest/api/content/%s/child/comment?limit=%d&depth=all&expand=body.storage,version,history,ancestors",
-		url.PathEscape(pageID), limit)
+// GetComments returns the comments on a page, starting at the zero-based offset
+// start. depth=all includes nested replies (children of comments), not just
+// top-level comments; history carries each comment's author and created date,
+// and ancestors gives its reply chain.
+func (c *Client) GetComments(pageID string, limit, start int) (string, error) {
+	path := fmt.Sprintf("/rest/api/content/%s/child/comment?limit=%d&depth=all&expand=body.storage,version,history,ancestors%s",
+		url.PathEscape(pageID), limit, startParam(start))
 	return c.get(path)
 }
 
-// CreatePage creates a new page. parentID is optional (empty for a top-level
-// page). representation is the body format, e.g. "storage" or "wiki".
-func (c *Client) CreatePage(spaceKey, title, content, parentID, representation string) (string, error) {
+// GetAttachmentsFrom is GetAttachments with a paging offset, so a caller can
+// walk past the first page of a heavily attached page by advancing start.
+func (c *Client) GetAttachmentsFrom(pageID string, limit, start int) (string, error) {
+	path := fmt.Sprintf("/rest/api/content/%s/child/attachment?limit=%d&expand=version,metadata%s",
+		url.PathEscape(pageID), limit, startParam(start))
+	return c.get(path)
+}
+
+// CreatePage creates a new page or blog post. parentID is optional (empty for a
+// top-level page) and is rejected for a blog post, which has no ancestors.
+// contentType is "page" (the default when empty) or "blogpost"; representation
+// is the body format, e.g. "storage" or "wiki".
+func (c *Client) CreatePage(spaceKey, title, content, parentID, representation, contentType string) (string, error) {
+	resolvedType, err := resolveContentType(contentType, parentID)
+	if err != nil {
+		return "", err
+	}
+
 	payload := map[string]any{
-		"type":  "page",
+		"type":  resolvedType,
 		"title": title,
 		"space": map[string]any{"key": spaceKey},
 		"body":  bodyField(representation, content),
@@ -146,6 +241,7 @@ func (c *Client) UpdatePageAt(pageID, content, title, representation string, exp
 	}
 
 	var current struct {
+		Type  string `json:"type"`
 		Title string `json:"title"`
 		Space struct {
 			Key string `json:"key"`
@@ -164,7 +260,7 @@ func (c *Client) UpdatePageAt(pageID, content, title, representation string, exp
 
 	payload := map[string]any{
 		"id":      pageID,
-		"type":    "page",
+		"type":    contentTypeOf(current.Type),
 		"title":   title,
 		"space":   map[string]any{"key": current.Space.Key},
 		"version": map[string]any{"number": nextVersion(current.Version.Number, expectedVersion)},
@@ -185,6 +281,7 @@ func (c *Client) RenamePage(pageID, title string) (string, error) {
 	}
 
 	var current struct {
+		Type  string `json:"type"`
 		Space struct {
 			Key string `json:"key"`
 		} `json:"space"`
@@ -204,7 +301,7 @@ func (c *Client) RenamePage(pageID, title string) (string, error) {
 
 	payload := map[string]any{
 		"id":      pageID,
-		"type":    "page",
+		"type":    contentTypeOf(current.Type),
 		"title":   title,
 		"space":   map[string]any{"key": current.Space.Key},
 		"version": map[string]any{"number": current.Version.Number + 1},
@@ -247,10 +344,29 @@ func (c *Client) AddComment(pageID, content, representation string) (string, err
 	return c.do(http.MethodPost, "/rest/api/content", string(body))
 }
 
-// DeletePage deletes a page by ID (moves it to the trash).
+// DeletePage deletes a page by ID (moves it to the trash, where a space admin
+// can still restore it).
 func (c *Client) DeletePage(pageID string) error {
 	_, err := c.do(http.MethodDelete, "/rest/api/content/"+url.PathEscape(pageID), "")
 	return err
+}
+
+// PurgePage deletes a page and then removes it from the trash, destroying it
+// for good. Confluence only purges content that is already trashed, so this is
+// necessarily two requests: the ordinary delete, then a delete of the trashed
+// copy.
+func (c *Client) PurgePage(pageID string) error {
+	if err := c.DeletePage(pageID); err != nil {
+		return err
+	}
+	// The purge needs space-admin rights the first delete does not, so this half
+	// commonly fails on its own. Saying so keeps a caller from concluding the
+	// page is untouched and retrying against a page that is already trashed.
+	if _, err := c.do(http.MethodDelete, "/rest/api/content/"+url.PathEscape(pageID)+"?status=trashed", ""); err != nil {
+		return fmt.Errorf("page %s was moved to the trash but could not be purged (purging requires "+
+			"space-admin rights); it is recoverable from the trash: %w", pageID, err)
+	}
+	return nil
 }
 
 // UpdateComment edits an existing comment, bumping whatever version the server
@@ -328,6 +444,7 @@ func (c *Client) MovePageAt(pageID, targetParentID string, expectedVersion int) 
 	}
 
 	var current struct {
+		Type  string `json:"type"`
 		Title string `json:"title"`
 		Space struct {
 			Key string `json:"key"`
@@ -348,7 +465,7 @@ func (c *Client) MovePageAt(pageID, targetParentID string, expectedVersion int) 
 
 	payload := map[string]any{
 		"id":        pageID,
-		"type":      "page",
+		"type":      contentTypeOf(current.Type),
 		"title":     current.Title,
 		"space":     map[string]any{"key": current.Space.Key},
 		"version":   map[string]any{"number": nextVersion(current.Version.Number, expectedVersion)},

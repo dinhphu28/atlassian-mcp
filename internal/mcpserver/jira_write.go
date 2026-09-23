@@ -50,9 +50,12 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 
 	addCommentTool := mcp.NewTool(
 		"jira_add_comment",
-		mcp.WithDescription("Add a comment to a Jira issue"),
+		mcp.WithDescription("Add a comment to a Jira issue. By default everyone who can see the issue can read it; "+
+			"pass visibility_type and visibility_value together to restrict it to a project role or a group."),
 		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
 		mcp.WithString("body", mcp.Required(), mcp.Description("Comment body (Jira wiki markup)")),
+		mcp.WithString("visibility_type", mcp.Description("Restrict the comment to a 'role' or a 'group'; requires visibility_value")),
+		mcp.WithString("visibility_value", mcp.Description("Project role name (e.g. Administrators) or group name (e.g. jira-developers); requires visibility_type")),
 	)
 
 	s.AddTool(addCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -65,15 +68,24 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.AddComment(key, body))
+		return jsonResult(client.AddComment(
+			key, body,
+			request.GetString("visibility_type", ""),
+			request.GetString("visibility_value", ""),
+		))
 	})
 
 	updateCommentTool := mcp.NewTool(
 		"jira_update_comment",
-		mcp.WithDescription("Edit an existing comment on a Jira issue (get the comment id from jira_get_comments)"),
+		mcp.WithDescription("Edit an existing comment on a Jira issue (get the comment id from jira_get_comments). "+
+			"Omitting visibility_type and visibility_value keeps the comment's current restriction: the edit "+
+			"would otherwise republish a restricted comment to everyone who can see the issue."),
 		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
 		mcp.WithString("comment_id", mcp.Required(), mcp.Description("Comment id from jira_get_comments")),
 		mcp.WithString("body", mcp.Required(), mcp.Description("New comment body (Jira wiki markup)")),
+		mcp.WithString("visibility_type", mcp.Description("Restrict the comment to a 'role' or a 'group' (requires visibility_value), "+
+			"or 'none' to remove an existing restriction. Omit to keep the comment's current restriction.")),
+		mcp.WithString("visibility_value", mcp.Description("Project role name (e.g. Administrators) or group name (e.g. jira-developers); requires visibility_type")),
 	)
 
 	s.AddTool(updateCommentTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -90,7 +102,11 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		return jsonResult(client.UpdateComment(key, commentID, body))
+		return jsonResult(client.UpdateComment(
+			key, commentID, body,
+			request.GetString("visibility_type", ""),
+			request.GetString("visibility_value", ""),
+		))
 	})
 
 	deleteCommentTool := mcp.NewTool(
@@ -198,9 +214,17 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 
 	transitionIssueTool := mcp.NewTool(
 		"jira_transition_issue",
-		mcp.WithDescription("Move a Jira issue through a status transition (get the id from jira_get_transitions)"),
+		mcp.WithDescription("Move a Jira issue through a status transition (get the id from jira_get_transitions). "+
+			"A transition whose screen requires input fails unless those fields are supplied: the usual one is "+
+			"'resolution' on a Done transition. Call jira_get_transitions with expand_fields=true to see exactly "+
+			"which fields a transition screen requires and which values it allows."),
 		mcp.WithString("issue_key", mcp.Required(), mcp.Description("Issue key (e.g. DEV-123) or numeric ID")),
 		mcp.WithString("transition_id", mcp.Required(), mcp.Description("Transition id from jira_get_transitions")),
+		mcp.WithString("resolution", mcp.Description("Resolution name (e.g. Done, case-insensitive) or id, for a transition screen that requires one; "+
+			"the accepted values are the transition screen's, listed by jira_get_transitions with expand_fields=true")),
+		mcp.WithString("comment", mcp.Description("Comment to post as part of the transition (Jira wiki markup)")),
+		mcp.WithString("fields", mcp.Description("Raw JSON object of any other fields the transition screen requires, "+
+			"e.g. {\"customfield_10001\": {\"value\": \"Yes\"}}")),
 	)
 
 	s.AddTool(transitionIssueTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -213,7 +237,12 @@ func registerJiraWriteTools(s *server.MCPServer, client *jira.Client) {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		if err := client.TransitionIssue(key, transitionID); err != nil {
+		if err := client.TransitionIssue(
+			key, transitionID,
+			request.GetString("resolution", ""),
+			request.GetString("comment", ""),
+			request.GetString("fields", ""),
+		); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 

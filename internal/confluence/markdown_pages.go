@@ -14,20 +14,21 @@ import (
 // or one that returns an error, causes the diagram to fall back to a code macro.
 type MermaidRenderer func(source string) ([]byte, error)
 
-// CreatePageMarkdown creates a page from Markdown. Mermaid diagrams are rendered
-// and uploaded as attachments; if that is not possible they degrade to code
-// macros. Because attachments require an existing page, a page with diagrams is
-// created first (with code-macro fallbacks) and then patched to reference the
-// uploaded images. The returned warnings list any diagram that did not become an
-// image (and why); the page write still succeeds.
-func (c *Client) CreatePageMarkdown(spaceKey, title, md, parentID string, render MermaidRenderer) (string, []string, error) {
+// CreatePageMarkdown creates a page (or, with contentType "blogpost", a blog
+// post) from Markdown. Mermaid diagrams are rendered and uploaded as
+// attachments; if that is not possible they degrade to code macros. Because
+// attachments require an existing page, content with diagrams is created first
+// (with code-macro fallbacks) and then patched to reference the uploaded images.
+// The returned warnings list any diagram that did not become an image (and why);
+// the write still succeeds.
+func (c *Client) CreatePageMarkdown(spaceKey, title, md, parentID, contentType string, render MermaidRenderer) (string, []string, error) {
 	storage, diagrams, err := markdown.ToStorage(md)
 	if err != nil {
 		return "", nil, err
 	}
 
 	initial := applyDiagrams(storage, diagrams, nil)
-	raw, err := c.CreatePage(spaceKey, title, initial, parentID, "storage")
+	raw, err := c.CreatePage(spaceKey, title, initial, parentID, "storage", contentType)
 	if err != nil {
 		return "", nil, err
 	}
@@ -268,7 +269,15 @@ type PageMarkdown struct {
 
 // GetPageMarkdown fetches a page and returns its body converted to Markdown.
 func (c *Client) GetPageMarkdown(pageID string) (*PageMarkdown, error) {
-	raw, err := c.GetPage(pageID)
+	return c.GetPageMarkdownAt(pageID, 0)
+}
+
+// GetPageMarkdownAt is GetPageMarkdown for one revision: a version greater than
+// zero converts that historical body instead of the current one. Version is the
+// revision actually read, so a caller restoring an old page can tell which one
+// it has in hand.
+func (c *Client) GetPageMarkdownAt(pageID string, version int) (*PageMarkdown, error) {
+	raw, err := c.GetPageAt(pageID, version)
 	if err != nil {
 		return nil, err
 	}
@@ -308,9 +317,10 @@ func (c *Client) GetPageMarkdown(pageID string) (*PageMarkdown, error) {
 }
 
 // GetCommentsMarkdown fetches a page's comments and returns them as a Markdown
-// list, each comment's body converted from storage format.
-func (c *Client) GetCommentsMarkdown(pageID string, limit int) (string, error) {
-	raw, err := c.GetComments(pageID, limit)
+// list, each comment's body converted from storage format. start is the paging
+// offset, as on GetComments.
+func (c *Client) GetCommentsMarkdown(pageID string, limit, start int) (string, error) {
+	raw, err := c.GetComments(pageID, limit, start)
 	if err != nil {
 		return "", err
 	}
